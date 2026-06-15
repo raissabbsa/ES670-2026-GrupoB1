@@ -1,0 +1,9 @@
+2026-06-15 20:18:29,630 [INFO] Activator:176 - 
+
+
+2026-06-15 20:18:29,630 [INFO] Activator:177 - !SESSION log4j initialized
+2026-06-15 20:18:32,052 [INFO] LogOutputStream:77 - [STDOUT_REDIRECT] 
+2026-06-15 20:18:33,022 [ERROR] LogOutputStream:75 - [STDERR_REDIRECT] [Fatal Error] :1:1: Fim prematuro do arquivo.
+2026-06-15 20:18:33,024 [ERROR] LogOutputStream:75 - [STDERR_REDIRECT] 
+2026-06-15 20:18:33,956 [ERROR] LogOutputStream:75 - [STDERR_REDIRECT] [Fatal Error] :1:1: Fim prematuro do arquivo.
+2026-06-15 20:18:33,956 [ERROR] LogOutputStream:75 - [STDERR_REDIRECT] 
