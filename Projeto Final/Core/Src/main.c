@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "encoders.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -131,7 +131,7 @@ int main(void)
   MX_ADC5_Init();
   MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
-
+  ENC_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
