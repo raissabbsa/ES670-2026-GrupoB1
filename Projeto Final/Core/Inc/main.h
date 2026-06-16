@@ -122,6 +122,7 @@ void Error_Handler(void);
 #define Buzzer_PWM_GPIO_Port GPIOA
 #define Switch_Fr_Pin GPIO_PIN_2
 #define Switch_Fr_GPIO_Port GPIOD
+#define Switch_Fr_EXTI_IRQn EXTI2_IRQn
 #define T_SWO_Pin GPIO_PIN_3
 #define T_SWO_GPIO_Port GPIOB
 #define Encoder_Esq_TIM_Pin GPIO_PIN_4

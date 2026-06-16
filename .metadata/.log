@@ -12647,3 +12647,69 @@ org.xml.sax.SAXParseException; lineNumber: 1; columnNumber: 1; Premature end of 
 	at com.st.stm32cube.ide.mpu.remote.serial.internal.SerialPortProviderWindows.run(SerialPortProviderWindows.java:127)
 	at java.base/java.util.TimerThread.mainLoop(Timer.java:556)
 	at java.base/java.util.TimerThread.run(Timer.java:506)
+!SESSION 2026-06-15 21:04:55.629 -----------------------------------------------
+eclipse.buildId=Version 1.12.1
+java.version=11.0.17
+java.vendor=Eclipse Adoptium
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=pt_BR
+Command-line arguments:  -os linux -ws gtk -arch x86_64
+
+!ENTRY com.st.stm32cube.ide.mcu.informationcenter 4 4 2026-06-15 21:05:04.561
+!MESSAGE CubeMX plugin appears to be active, Log4j initialization might be too late.
+
+!ENTRY com.st.stm32cube.ide.mcu.informationcenter 1 1 2026-06-15 21:05:04.563
+!MESSAGE Log4j2 initialized with config file /home/Raissa/Downloads/Unicamp/ES670-2026-GrupoB1/.metadata/.log4j2.xml
+
+!ENTRY com.st.stm32cube.ide.mcu.ide 1 1 2026-06-15 21:05:07.728
+!MESSAGE Started RMI Server, listening on port 41337
+!SESSION 2026-06-15 21:05:25.693 -----------------------------------------------
+eclipse.buildId=Version 1.12.1
+java.version=11.0.17
+java.vendor=Eclipse Adoptium
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=pt_BR
+Command-line arguments:  -data /home/Raissa/Downloads/Unicamp/ES670-2026-GrupoB1 -os linux -ws gtk -arch x86_64
+
+!ENTRY com.st.stm32cube.ide.mcu.informationcenter 4 4 2026-06-15 21:05:30.904
+!MESSAGE CubeMX plugin appears to be active, Log4j initialization might be too late.
+
+!ENTRY com.st.stm32cube.ide.mcu.informationcenter 1 1 2026-06-15 21:05:30.906
+!MESSAGE Log4j2 initialized with config file /home/Raissa/Downloads/Unicamp/ES670-2026-GrupoB1/.metadata/.log4j2.xml
+
+!ENTRY com.st.stm32cube.ide.mcu.ide 1 1 2026-06-15 21:05:34.365
+!MESSAGE Started RMI Server, listening on port 41337
+!SESSION 2026-06-15 21:07:30.715 -----------------------------------------------
+eclipse.buildId=Version 1.12.1
+java.version=11.0.17
+java.vendor=Eclipse Adoptium
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=pt_BR
+Command-line arguments:  -data /home/Raissa/Downloads/Unicamp/ES670-2026-GrupoB1 -os linux -ws gtk -arch x86_64
+
+!ENTRY com.st.stm32cube.ide.mcu.informationcenter 4 4 2026-06-15 21:07:35.893
+!MESSAGE CubeMX plugin appears to be active, Log4j initialization might be too late.
+
+!ENTRY com.st.stm32cube.ide.mcu.informationcenter 1 1 2026-06-15 21:07:35.895
+!MESSAGE Log4j2 initialized with config file /home/Raissa/Downloads/Unicamp/ES670-2026-GrupoB1/.metadata/.log4j2.xml
+
+!ENTRY com.st.stm32cube.ide.mcu.ide 1 1 2026-06-15 21:07:39.404
+!MESSAGE Started RMI Server, listening on port 41337
+
+!ENTRY org.eclipse.cdt.core 1 0 2026-06-15 21:09:11.773
+!MESSAGE Indexed 'Projeto Final' (28 sources, 90 headers) in 5,83 sec: 8.917 declarations; 74.865 references; 0 unresolved inclusions; 1 syntax errors; 2 unresolved names (0,0024%)
+!SESSION 2026-06-15 21:19:51.653 -----------------------------------------------
+eclipse.buildId=Version 1.12.1
+java.version=11.0.17
+java.vendor=Eclipse Adoptium
+BootLoader constants: OS=linux, ARCH=x86_64, WS=gtk, NL=pt_BR
+Command-line arguments:  -os linux -ws gtk -arch x86_64
+
+!ENTRY org.eclipse.core.resources 2 10035 2026-06-15 21:19:55.828
+!MESSAGE The workspace exited with unsaved changes in the previous session; refreshing workspace to recover changes.
+
+!ENTRY com.st.stm32cube.ide.mcu.informationcenter 4 4 2026-06-15 21:19:59.386
+!MESSAGE CubeMX plugin appears to be active, Log4j initialization might be too late.
+
+!ENTRY com.st.stm32cube.ide.mcu.informationcenter 1 1 2026-06-15 21:19:59.387
+!MESSAGE Log4j2 initialized with config file /home/Raissa/Downloads/Unicamp/ES670-2026-GrupoB1/.metadata/.log4j2.xml
+
+!ENTRY com.st.stm32cube.ide.mcu.ide 1 1 2026-06-15 21:20:04.456
+!MESSAGE Started RMI Server, listening on port 41337
