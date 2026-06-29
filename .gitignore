@@ -5,39 +5,59 @@ build/
 *.o
 *.d
 *.su
+*.cyclo
 *.list
 *.map
 *.elf
 *.bin
 *.hex
 *.srec
+objects.list
+objects.mk
+sources.mk
+subdir.mk
+makefile
 
 # === Settings da workspace do Eclipse (locais) ===
 .metadata/
 .settings/
+.cproject
+.project
+.mxproject
 *.launch
 RemoteSystemsTempFiles/
 
-# === Drivers gerados pelo CubeMX ===
-# Estes são RECRIADOS pelo Generate Code, ocupam ~100MB e quebram o histórico.
-# OPÇÃO A (recomendada): NÃO commitar; cada pessoa gera localmente.
+# === Drivers gerados pelo CubeMX (recriados pelo Generate Code) ===
 Drivers/CMSIS/
 Drivers/STM32G4xx_HAL_Driver/
 Middlewares/
 
-# OPÇÃO B: commitar tudo — só faça isso se o seu parceiro NÃO vai mexer
-# no .ioc, senão dá conflito gigante em arquivos auto-gerados.
-
 # === Backup do CubeMX ===
 *.ioc.bak
-.mxproject
 
 # === Sistemas operacionais ===
 .DS_Store
 Thumbs.db
 desktop.ini
+*~
 
 # === Editores ===
 .vscode/
 .idea/
 *.swp
+
+# === Backup folders ===
+*_backup/
+*.bak
+
+# === Material de apoio do professor (nao versionar) ===
+auxilio-tecnico/
+
+# === Arquivos grandes ===
+*.pdf
+*.zip
+*.rar
+
+# === Opencode/cursor temporarios ===
+.opencode/
+.cursor/

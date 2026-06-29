@@ -18,10 +18,14 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "app_tasks.h"
+#include "encoder.h"
+#include "line_sensor.h"
+#include "motor.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -43,6 +47,7 @@
 ADC_HandleTypeDef hadc1;
 ADC_HandleTypeDef hadc2;
 ADC_HandleTypeDef hadc3;
+ADC_HandleTypeDef hadc4;
 ADC_HandleTypeDef hadc5;
 
 I2C_HandleTypeDef hi2c2;
@@ -58,6 +63,25 @@ TIM_HandleTypeDef htim16;
 TIM_HandleTypeDef htim17;
 TIM_HandleTypeDef htim20;
 
+/* Definitions for LineCtrlTask */
+osThreadId_t LineCtrlTaskHandle;
+const osThreadAttr_t LineCtrlTask_attributes = {
+  .name = "LineCtrlTask",
+  .priority = (osPriority_t) osPriorityNormal,
+  .stack_size = 512 * 4
+};
+/* Definitions for MotorCtrlTask */
+osThreadId_t MotorCtrlTaskHandle;
+const osThreadAttr_t MotorCtrlTask_attributes = {
+  .name = "MotorCtrlTask",
+  .priority = (osPriority_t) osPriorityAboveNormal,
+  .stack_size = 512 * 4
+};
+/* Definitions for queueMotorCmd */
+osMessageQueueId_t queueMotorCmdHandle;
+const osMessageQueueAttr_t queueMotorCmd_attributes = {
+  .name = "queueMotorCmd"
+};
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -76,9 +100,13 @@ static void MX_TIM16_Init(void);
 static void MX_TIM17_Init(void);
 static void MX_TIM20_Init(void);
 static void MX_ADC1_Init(void);
-static void MX_ADC2_Init(void);
 static void MX_ADC5_Init(void);
 static void MX_TIM4_Init(void);
+static void MX_ADC2_Init(void);
+static void MX_ADC4_Init(void);
+void StartLineCtrlTask(void *argument);
+void StartMotorCtrlTask(void *argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -127,13 +155,73 @@ int main(void)
   MX_TIM17_Init();
   MX_TIM20_Init();
   MX_ADC1_Init();
-  MX_ADC2_Init();
   MX_ADC5_Init();
   MX_TIM4_Init();
+  MX_ADC2_Init();
+  MX_ADC4_Init();
   /* USER CODE BEGIN 2 */
+  {
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
 
+    GPIO_InitStruct.Pin = BT_Enter_Pin | BT_Baixo_Pin | BT_Esq_Pin | BT_Dir_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = BT_Cima_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+    HAL_GPIO_Init(BT_Cima_GPIO_Port, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = Switch_Fr_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(Switch_Fr_GPIO_Port, &GPIO_InitStruct);
+  }
+
+  Motor_Init();
   /* USER CODE END 2 */
 
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* Create the queue(s) */
+  /* creation of queueMotorCmd */
+  queueMotorCmdHandle = osMessageQueueNew (8, sizeof(MotorCmd_t), &queueMotorCmd_attributes);
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of LineCtrlTask */
+  LineCtrlTaskHandle = osThreadNew(StartLineCtrlTask, NULL, &LineCtrlTask_attributes);
+
+  /* creation of MotorCtrlTask */
+  MotorCtrlTaskHandle = osThreadNew(StartMotorCtrlTask, NULL, &MotorCtrlTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+  /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
@@ -383,6 +471,65 @@ static void MX_ADC3_Init(void)
   /* USER CODE BEGIN ADC3_Init 2 */
 
   /* USER CODE END ADC3_Init 2 */
+
+}
+
+/**
+  * @brief ADC4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC4_Init(void)
+{
+
+  /* USER CODE BEGIN ADC4_Init 0 */
+
+  /* USER CODE END ADC4_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC4_Init 1 */
+
+  /* USER CODE END ADC4_Init 1 */
+
+  /** Common config
+  */
+  hadc4.Instance = ADC4;
+  hadc4.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc4.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc4.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc4.Init.GainCompensation = 0;
+  hadc4.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc4.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc4.Init.LowPowerAutoWait = DISABLE;
+  hadc4.Init.ContinuousConvMode = DISABLE;
+  hadc4.Init.NbrOfConversion = 1;
+  hadc4.Init.DiscontinuousConvMode = DISABLE;
+  hadc4.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc4.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc4.Init.DMAContinuousRequests = DISABLE;
+  hadc4.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  hadc4.Init.OversamplingMode = DISABLE;
+  if (HAL_ADC_Init(&hadc4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_5;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfig.SingleDiff = ADC_SINGLE_ENDED;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset = 0;
+  if (HAL_ADC_ConfigChannel(&hadc4, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC4_Init 2 */
+
+  /* USER CODE END ADC4_Init 2 */
 
 }
 
@@ -1027,7 +1174,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, LED_Y_Pin|Motor_Esq_IN2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, Motor_Dir_IN3_Pin|Moto_Esq_IN1_Pin|Motor_Dir_IN4_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, Motor_Dir_IN3_Pin|Motor_Esq_IN1_Pin|Motor_Dir_IN4_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : B1_Pin BT_Enter_Pin BT_Baixo_Pin BT_Esq_Pin
                            BT_Dir_Pin */
@@ -1050,8 +1197,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(Tensao_Bateria_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : Motor_Dir_IN3_Pin Moto_Esq_IN1_Pin Motor_Dir_IN4_Pin */
-  GPIO_InitStruct.Pin = Motor_Dir_IN3_Pin|Moto_Esq_IN1_Pin|Motor_Dir_IN4_Pin;
+  /*Configure GPIO pins : Motor_Dir_IN3_Pin Motor_Esq_IN1_Pin Motor_Dir_IN4_Pin */
+  GPIO_InitStruct.Pin = Motor_Dir_IN3_Pin|Motor_Esq_IN1_Pin|Motor_Dir_IN4_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -1070,19 +1217,115 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(BT_Cima_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI2_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI2_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI2_IRQn);
 
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
 
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    static uint32_t last_enter_tick = 0;
+    static uint32_t last_baixo_tick = 0;
+
+    if (GPIO_Pin == BT_Enter_Pin) {
+        if (HAL_GPIO_ReadPin(BT_Enter_GPIO_Port, BT_Enter_Pin) != GPIO_PIN_SET) {
+            return;
+        }
+
+        uint32_t now = HAL_GetTick();
+        if (now - last_enter_tick < 200) {
+            return;
+        }
+        last_enter_tick = now;
+
+        if (follower_state == STATE_IDLE || follower_state == STATE_STOPPED ||
+            follower_state == STATE_DEBUG) {
+            LineSensor_ResetCalibration();
+            follower_state = STATE_ALIGNING;
+            HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
+        }
+        /* Enter so inicia; para durante seguimento use o switch frontal */
+    }
+
+    if (GPIO_Pin == BT_Baixo_Pin) {
+        if (HAL_GPIO_ReadPin(BT_Baixo_GPIO_Port, BT_Baixo_Pin) != GPIO_PIN_SET) {
+            return;
+        }
+
+        uint32_t now = HAL_GetTick();
+        if (now - last_baixo_tick < 200) {
+            return;
+        }
+        last_baixo_tick = now;
+
+        if (follower_state == STATE_DEBUG) {
+            follower_state = STATE_IDLE;
+            HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_RESET);
+        } else {
+            follower_state = STATE_DEBUG;
+            HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
+        }
+    }
+
+    if (GPIO_Pin == Switch_Fr_Pin) {
+        if (HAL_GPIO_ReadPin(Switch_Fr_GPIO_Port, Switch_Fr_Pin) != GPIO_PIN_RESET) {
+            return;
+        }
+
+        if (follower_state == STATE_FOLLOWING || follower_state == STATE_IN_CROSSING) {
+            follower_state = STATE_STOPPING;
+            HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_RESET);
+        }
+    }
+}
+
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM16) {
+        Encoder_LeftPulseISR();
+    } else if (htim->Instance == TIM17) {
+        Encoder_RightPulseISR();
+    }
+}
+
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartLineCtrlTask */
+/**
+  * @brief  Function implementing the LineCtrlTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartLineCtrlTask */
+void StartLineCtrlTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  App_LineCtrlTask(argument);
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartMotorCtrlTask */
+/**
+* @brief Function implementing the MotorCtrlTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartMotorCtrlTask */
+void StartMotorCtrlTask(void *argument)
+{
+  /* USER CODE BEGIN StartMotorCtrlTask */
+  App_MotorCtrlTask(argument);
+  /* USER CODE END StartMotorCtrlTask */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

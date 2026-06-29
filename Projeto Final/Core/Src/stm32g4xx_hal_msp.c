@@ -72,6 +72,8 @@ void HAL_MspInit(void)
   __HAL_RCC_PWR_CLK_ENABLE();
 
   /* System interrupt init*/
+  /* PendSV_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(PendSV_IRQn, 15, 0);
 
   /** Disable the internal Pull-Up in Dead Battery pins of UCPD peripheral
   */
@@ -151,21 +153,14 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     }
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
-    __HAL_RCC_GPIOB_CLK_ENABLE();
     /**ADC2 GPIO Configuration
     PA0     ------> ADC2_IN1
     PA6     ------> ADC2_IN3
-    PB15     ------> ADC2_IN15
     */
     GPIO_InitStruct.Pin = IR1_AD_Pin|IR2_AD_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = IR4_AD_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    HAL_GPIO_Init(IR4_AD_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN ADC2_MspInit 1 */
 
@@ -204,6 +199,40 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
   /* USER CODE BEGIN ADC3_MspInit 1 */
 
   /* USER CODE END ADC3_MspInit 1 */
+  }
+  else if(hadc->Instance==ADC4)
+  {
+  /* USER CODE BEGIN ADC4_MspInit 0 */
+
+  /* USER CODE END ADC4_MspInit 0 */
+
+  /** Initializes the peripherals clocks
+  */
+    PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC345;
+    PeriphClkInit.Adc345ClockSelection = RCC_ADC345CLKSOURCE_SYSCLK;
+    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    /* Peripheral clock enable */
+    HAL_RCC_ADC345_CLK_ENABLED++;
+    if(HAL_RCC_ADC345_CLK_ENABLED==1){
+      __HAL_RCC_ADC345_CLK_ENABLE();
+    }
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    /**ADC4 GPIO Configuration
+    PB15     ------> ADC4_IN5
+    */
+    GPIO_InitStruct.Pin = IR4_AD_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(IR4_AD_GPIO_Port, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN ADC4_MspInit 1 */
+
+  /* USER CODE END ADC4_MspInit 1 */
   }
   else if(hadc->Instance==ADC5)
   {
@@ -284,11 +313,8 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* hadc)
     /**ADC2 GPIO Configuration
     PA0     ------> ADC2_IN1
     PA6     ------> ADC2_IN3
-    PB15     ------> ADC2_IN15
     */
     HAL_GPIO_DeInit(GPIOA, IR1_AD_Pin|IR2_AD_Pin);
-
-    HAL_GPIO_DeInit(IR4_AD_GPIO_Port, IR4_AD_Pin);
 
   /* USER CODE BEGIN ADC2_MspDeInit 1 */
 
@@ -313,6 +339,26 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* hadc)
   /* USER CODE BEGIN ADC3_MspDeInit 1 */
 
   /* USER CODE END ADC3_MspDeInit 1 */
+  }
+  else if(hadc->Instance==ADC4)
+  {
+  /* USER CODE BEGIN ADC4_MspDeInit 0 */
+
+  /* USER CODE END ADC4_MspDeInit 0 */
+    /* Peripheral clock disable */
+    HAL_RCC_ADC345_CLK_ENABLED--;
+    if(HAL_RCC_ADC345_CLK_ENABLED==0){
+      __HAL_RCC_ADC345_CLK_DISABLE();
+    }
+
+    /**ADC4 GPIO Configuration
+    PB15     ------> ADC4_IN5
+    */
+    HAL_GPIO_DeInit(IR4_AD_GPIO_Port, IR4_AD_Pin);
+
+  /* USER CODE BEGIN ADC4_MspDeInit 1 */
+
+  /* USER CODE END ADC4_MspDeInit 1 */
   }
   else if(hadc->Instance==ADC5)
   {
@@ -497,7 +543,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     /* USART3 interrupt Init */
-    HAL_NVIC_SetPriority(USART3_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(USART3_IRQn);
   /* USER CODE BEGIN USART3_MspInit 1 */
 
@@ -571,9 +617,9 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef* htim_pwm)
     /* Peripheral clock enable */
     __HAL_RCC_TIM1_CLK_ENABLE();
     /* TIM1 interrupt Init */
-    HAL_NVIC_SetPriority(TIM1_UP_TIM16_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(TIM1_UP_TIM16_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(TIM1_UP_TIM16_IRQn);
-    HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM17_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM17_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(TIM1_TRG_COM_TIM17_IRQn);
   /* USER CODE BEGIN TIM1_MspInit 1 */
 
@@ -644,7 +690,7 @@ void HAL_TIM_IC_MspInit(TIM_HandleTypeDef* htim_ic)
     HAL_GPIO_Init(Ultra_Eco_TIM_GPIO_Port, &GPIO_InitStruct);
 
     /* TIM3 interrupt Init */
-    HAL_NVIC_SetPriority(TIM3_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(TIM3_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(TIM3_IRQn);
   /* USER CODE BEGIN TIM3_MspInit 1 */
 
@@ -682,7 +728,7 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* htim_base)
     HAL_GPIO_Init(Encoder_Esq_TIM_GPIO_Port, &GPIO_InitStruct);
 
     /* TIM16 interrupt Init */
-    HAL_NVIC_SetPriority(TIM1_UP_TIM16_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(TIM1_UP_TIM16_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(TIM1_UP_TIM16_IRQn);
   /* USER CODE BEGIN TIM16_MspInit 1 */
 
@@ -708,7 +754,7 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* htim_base)
     HAL_GPIO_Init(Encoder_Dir_TIM_GPIO_Port, &GPIO_InitStruct);
 
     /* TIM17 interrupt Init */
-    HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM17_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM17_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(TIM1_TRG_COM_TIM17_IRQn);
   /* USER CODE BEGIN TIM17_MspInit 1 */
 

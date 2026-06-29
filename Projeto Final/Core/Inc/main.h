@@ -131,8 +131,8 @@ void Error_Handler(void);
 #define Encoder_Dir_TIM_GPIO_Port GPIOB
 #define BT_Cima_Pin GPIO_PIN_6
 #define BT_Cima_GPIO_Port GPIOB
-#define Moto_Esq_IN1_Pin GPIO_PIN_7
-#define Moto_Esq_IN1_GPIO_Port GPIOB
+#define Motor_Esq_IN1_Pin GPIO_PIN_7
+#define Motor_Esq_IN1_GPIO_Port GPIOB
 #define LED_B_PWM_Pin GPIO_PIN_8
 #define LED_B_PWM_GPIO_Port GPIOB
 #define Motor_Dir_IN4_Pin GPIO_PIN_9
