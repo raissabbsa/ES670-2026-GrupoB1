@@ -28,9 +28,11 @@ makefile
 RemoteSystemsTempFiles/
 
 # === Drivers gerados pelo CubeMX (recriados pelo Generate Code) ===
-Drivers/CMSIS/
-Drivers/STM32G4xx_HAL_Driver/
-Middlewares/
+# Padrões com ** casam em qualquer profundidade — o projeto STM32CubeIDE
+# fica em "Projeto Final/", então os Drivers/ estão um nível abaixo.
+**/Drivers/CMSIS/
+**/Drivers/STM32G4xx_HAL_Driver/
+**/Middlewares/
 
 # === Backup do CubeMX ===
 *.ioc.bak

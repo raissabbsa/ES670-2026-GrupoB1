@@ -14,6 +14,9 @@ typedef enum {
     STATE_STOPPING,
     STATE_STOPPED,
     STATE_DEBUG,
+    /* feature/joao — safety states */
+    STATE_STOP_OBSTACLE,   /* obstáculo à frente; retoma RUN quando livre   */
+    STATE_EMERGENCY,       /* bumper acionado; só sai com reset físico/STOP */
 } LineFollower_State;
 
 /* Motor command structure sent via queue */
@@ -41,5 +44,12 @@ extern volatile MotorCmd_t g_motor_cmd;
 
 void App_LineCtrlTask(void *argument);
 void App_MotorCtrlTask(void *argument);
+
+/* feature/joao — tasks adicionadas (definidas em task_safety.c, task_display.c,
+ * task_telemetry.c). Devem ser criadas a partir do USER CODE Application em
+ * app_freertos.c. */
+void App_SafetyTask   (void *argument);  /* 20ms — checa ultrassonico + bumper */
+void App_DisplayTask  (void *argument);  /* 500ms — atualiza LCD               */
+void App_TelemetryTask(void *argument);  /* 200ms — envia CSV + drena BT RX    */
 
 #endif /* APP_TASKS_H */

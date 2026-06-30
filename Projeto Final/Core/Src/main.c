@@ -26,6 +26,11 @@
 #include "encoder.h"
 #include "line_sensor.h"
 #include "motor.h"
+/* feature/joao — drivers e safety adicionados */
+#include "ultrasonic.h"
+#include "bumper.h"
+#include "bluetooth.h"
+#include "odometry.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -179,6 +184,12 @@ int main(void)
   }
 
   Motor_Init();
+
+  /* feature/joao — inicialização dos drivers de safety/UX/telemetria */
+  Ultrasonic_Init();
+  Bumper_Init();
+  Bluetooth_Init();
+  Odometry_Init();
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -212,7 +223,29 @@ int main(void)
   MotorCtrlTaskHandle = osThreadNew(StartMotorCtrlTask, NULL, &MotorCtrlTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  /* feature/joao — tasks adicionais (safety, display, telemetry). Mantemos
+   * a definição local aqui (e não no .ioc) para evitar conflito quando o
+   * CubeMX regenerar o arquivo. */
+  {
+    static const osThreadAttr_t SafetyTask_attrs = {
+        .name = "SafetyTask",
+        .priority   = (osPriority_t)osPriorityHigh,
+        .stack_size = 256 * 4,
+    };
+    static const osThreadAttr_t DisplayTask_attrs = {
+        .name = "DisplayTask",
+        .priority   = (osPriority_t)osPriorityLow,
+        .stack_size = 384 * 4,
+    };
+    static const osThreadAttr_t TelemetryTask_attrs = {
+        .name = "TelemetryTask",
+        .priority   = (osPriority_t)osPriorityLow,
+        .stack_size = 384 * 4,
+    };
+    osThreadNew(App_SafetyTask,    NULL, &SafetyTask_attrs);
+    osThreadNew(App_DisplayTask,   NULL, &DisplayTask_attrs);
+    osThreadNew(App_TelemetryTask, NULL, &TelemetryTask_attrs);
+  }
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -1281,10 +1314,24 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
             return;
         }
 
+        /* feature/joao — bumper latch: vai pra EMERGENCY (a task SafetyTask
+         * detecta a flag e mantém o robô parado até o operador limpar via
+         * comando BT "STOP" + reset; aqui também conserva o STATE_STOPPING
+         * existente quando estava seguindo, mas o EMERGENCY tem prioridade
+         * porque a SafetyTask sobrescreve a cada 20ms). */
+        Bumper_Trigger();
         if (follower_state == STATE_FOLLOWING || follower_state == STATE_IN_CROSSING) {
             follower_state = STATE_STOPPING;
             HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_RESET);
         }
+    }
+}
+
+/* feature/joao — callback de RX do HC-05 (USART3 huart3). */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART3) {
+        Bluetooth_RxIsr();
     }
 }
 
