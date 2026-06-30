@@ -31,6 +31,8 @@ RemoteSystemsTempFiles/
 Drivers/CMSIS/
 Drivers/STM32G4xx_HAL_Driver/
 Middlewares/
+Projeto Final/Drivers/
+Projeto Final/Middlewares/
 
 # === Backup do CubeMX ===
 *.ioc.bak

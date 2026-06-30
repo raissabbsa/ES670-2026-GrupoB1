@@ -26,6 +26,10 @@
 #include "encoder.h"
 #include "line_sensor.h"
 #include "motor.h"
+#include "telemetry.h"
+#include "lcd_i2c.h"
+#include "bluetooth.h"
+#include "ultrasonic.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -67,15 +71,15 @@ TIM_HandleTypeDef htim20;
 osThreadId_t LineCtrlTaskHandle;
 const osThreadAttr_t LineCtrlTask_attributes = {
   .name = "LineCtrlTask",
-  .priority = (osPriority_t) osPriorityNormal,
+  .priority = (osPriority_t) osPriorityIdle,
   .stack_size = 512 * 4
 };
 /* Definitions for MotorCtrlTask */
 osThreadId_t MotorCtrlTaskHandle;
 const osThreadAttr_t MotorCtrlTask_attributes = {
   .name = "MotorCtrlTask",
-  .priority = (osPriority_t) osPriorityAboveNormal,
-  .stack_size = 512 * 4
+  .priority = (osPriority_t) osPriorityNormal,
+  .stack_size = 256 * 4
 };
 /* Definitions for queueMotorCmd */
 osMessageQueueId_t queueMotorCmdHandle;
@@ -83,7 +87,19 @@ const osMessageQueueAttr_t queueMotorCmd_attributes = {
   .name = "queueMotorCmd"
 };
 /* USER CODE BEGIN PV */
-
+static osThreadId_t lcdTaskHandle;
+static const osThreadAttr_t lcdTask_attr = {
+    .name = "LcdTask",
+    .priority = (osPriority_t) osPriorityBelowNormal,
+    .stack_size = 256 * 4
+};
+static osThreadId_t btTaskHandle;
+static const osThreadAttr_t btTask_attr = {
+    .name = "BluetoothTask",
+    .priority = (osPriority_t) osPriorityBelowNormal,
+    .stack_size = 512 * 4
+};
+static uint8_t bt_rx_byte;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -179,13 +195,26 @@ int main(void)
   }
 
   Motor_Init();
+
+  {
+    GPIO_InitTypeDef buzzer_gpio = {0};
+    buzzer_gpio.Pin = Buzzer_PWM_Pin;
+    buzzer_gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    buzzer_gpio.Pull = GPIO_NOPULL;
+    buzzer_gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(Buzzer_PWM_GPIO_Port, &buzzer_gpio);
+    HAL_GPIO_WritePin(Buzzer_PWM_GPIO_Port, Buzzer_PWM_Pin, GPIO_PIN_RESET);
+  }
+
+  Ultrasonic_Init();
+  HAL_UART_Receive_IT(&huart3, &bt_rx_byte, 1);
   /* USER CODE END 2 */
 
   /* Init scheduler */
   osKernelInitialize();
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
+  Telemetry_Init();
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -198,7 +227,7 @@ int main(void)
 
   /* Create the queue(s) */
   /* creation of queueMotorCmd */
-  queueMotorCmdHandle = osMessageQueueNew (8, sizeof(MotorCmd_t), &queueMotorCmd_attributes);
+  queueMotorCmdHandle = osMessageQueueNew (16, sizeof(uint32_t), &queueMotorCmd_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
@@ -212,7 +241,8 @@ int main(void)
   MotorCtrlTaskHandle = osThreadNew(StartMotorCtrlTask, NULL, &MotorCtrlTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  lcdTaskHandle = osThreadNew(App_LcdTask, NULL, &lcdTask_attr);
+  btTaskHandle = osThreadNew(App_BluetoothTask, NULL, &btTask_attr);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -1294,6 +1324,16 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
         Encoder_LeftPulseISR();
     } else if (htim->Instance == TIM17) {
         Encoder_RightPulseISR();
+    } else if (htim->Instance == TIM3) {
+        Ultrasonic_CaptureISR();
+    }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART3) {
+        Bluetooth_RxCallback(bt_rx_byte);
+        HAL_UART_Receive_IT(huart, &bt_rx_byte, 1);
     }
 }
 

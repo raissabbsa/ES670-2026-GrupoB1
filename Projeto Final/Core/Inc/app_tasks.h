@@ -14,6 +14,7 @@ typedef enum {
     STATE_STOPPING,
     STATE_STOPPED,
     STATE_DEBUG,
+    STATE_MANUAL,
 } LineFollower_State;
 
 /* Motor command structure sent via queue */

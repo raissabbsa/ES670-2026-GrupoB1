@@ -5,6 +5,8 @@
 #include "motor.h"
 #include "encoder.h"
 #include "pid.h"
+#include "telemetry.h"
+#include "ultrasonic.h"
 #include "main.h"
 #include <stdio.h>
 #include <string.h>
@@ -13,13 +15,13 @@ extern osMessageQueueId_t queueMotorCmdHandle;
 extern UART_HandleTypeDef hlpuart1;
 
 AppConfig_t app_config = {
-    .line_Kp = 0.90f,
+    .line_Kp = 0.45f,
     .line_Ki = 0.0f,
-    .line_Kd = 0.20f,
+    .line_Kd = 0.0f,
     .speed_Kp = 1.0f,
     .speed_Ki = 0.5f,
     .speed_Kd = 0.0f,
-    .base_speed = 0.40f,
+    .base_speed = 0.35f,
     .sensor_threshold = 0,
     .max_time_ms = 90000,
 };
@@ -27,9 +29,10 @@ AppConfig_t app_config = {
 volatile LineFollower_State follower_state = STATE_IDLE;
 volatile MotorCmd_t g_motor_cmd = {0.0f, 0.0f};
 
-#define LINE_CORRECTION_MAX      0.20f
+#define LINE_CORRECTION_MAX      0.18f
 #define LINE_CALIBRATION_MS      650U
-#define LINE_LOST_STOP_COUNT     500U
+#define LINE_LOST_STOP_COUNT     200U
+#define FOLLOW_RAMP_MS           500U
 #define LINE_LOST_SPREAD_MIN     8U
 #define DEBUG_TX_INTERVAL_MS     500U
 #define FOLLOW_TX_INTERVAL_MS    400U
@@ -54,6 +57,8 @@ volatile MotorCmd_t g_motor_cmd = {0.0f, 0.0f};
 #define ALIGN_CENTER_ERR_MAX     0.08f
 #define ALIGN_SPIN_PULSES_ROT    70
 #define ALIGN_TOTAL_MAX_MS       8000U
+#define CROSSING_STRAIGHT_MS     300U
+#define ULTRASONIC_CHECK_CYCLES  5U
 
 typedef enum {
     ALIGN_PHASE_SPIN = 0,
@@ -181,6 +186,8 @@ void App_LineCtrlTask(void *argument)
     uint8_t align_detect_streak = 0;
     uint8_t align_ok_streak = 0;
     float filtered_line_error = 0.0f;
+    uint32_t crossing_start_tick = 0;
+    uint32_t ultrasonic_cycle = 0;
 
     TickType_t last_wake = xTaskGetTickCount();
 
@@ -439,8 +446,36 @@ void App_LineCtrlTask(void *argument)
             cmd.vel_right = 0.0f;
             g_motor_cmd = cmd;
             osMessageQueuePut(queueMotorCmdHandle, &cmd, 0, 0);
+            Motor_Brake();
             follower_state = STATE_STOPPED;
             PID_Reset(&line_pid);
+            App_DebugUartSend("=== PAROU ===\r\n");
+            Telemetry_SetState((uint8_t)STATE_STOPPED);
+            continue;
+
+        case STATE_IN_CROSSING: {
+            uint32_t cross_elapsed = (xTaskGetTickCount() - crossing_start_tick) * portTICK_PERIOD_MS;
+            cmd.vel_left = app_config.base_speed;
+            cmd.vel_right = app_config.base_speed;
+            App_ApplyMotorCmd(&cmd);
+
+            if (cross_elapsed >= CROSSING_STRAIGHT_MS) {
+                follower_state = STATE_FOLLOWING;
+                lost_counter = 0;
+                PID_Reset(&line_pid);
+                filtered_line_error = 0.0f;
+                App_DebugUartSend("Cruzamento OK\r\n");
+            }
+            continue;
+        }
+
+        case STATE_MANUAL:
+            cmd = g_motor_cmd;
+            if (cmd.vel_left <= 0.0f && cmd.vel_right <= 0.0f) {
+                Motor_Stop();
+            } else {
+                Motor_SetPowerDiff(cmd.vel_left, cmd.vel_right);
+            }
             continue;
 
         default:
@@ -457,6 +492,7 @@ void App_LineCtrlTask(void *argument)
         if (!follow_msg_sent) {
             follow_msg_sent = 1;
             App_DebugUartSend("=== SEGUINDO LINHA ===\r\n");
+            Telemetry_SetState((uint8_t)STATE_FOLLOWING);
         }
 
         uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -468,6 +504,34 @@ void App_LineCtrlTask(void *argument)
 
         LineSensor_ReadAll(sensor_values);
 
+        /* Ultrasonic safety check every N cycles */
+        ultrasonic_cycle++;
+        if (ultrasonic_cycle >= ULTRASONIC_CHECK_CYCLES) {
+            ultrasonic_cycle = 0;
+            uint16_t dist = Ultrasonic_ReadDistance();
+            Telemetry_SetObstacle(dist);
+            if (dist < ULTRASONIC_OBSTACLE_CM) {
+                HAL_GPIO_WritePin(Buzzer_PWM_GPIO_Port, Buzzer_PWM_Pin, GPIO_PIN_SET);
+                follower_state = STATE_STOPPING;
+                App_DebugUartSend("!!! OBSTACULO !!!\r\n");
+                continue;
+            } else {
+                HAL_GPIO_WritePin(Buzzer_PWM_GPIO_Port, Buzzer_PWM_Pin, GPIO_PIN_RESET);
+            }
+        }
+
+        /* Crossing detection */
+        LineSensor_State line_state = LineSensor_GetState(sensor_values);
+        if (line_state == LINE_CROSSING) {
+            crossing_start_tick = xTaskGetTickCount();
+            follower_state = STATE_IN_CROSSING;
+            App_DebugUartSend("Cruzamento!\r\n");
+            cmd.vel_left = app_config.base_speed;
+            cmd.vel_right = app_config.base_speed;
+            App_ApplyMotorCmd(&cmd);
+            continue;
+        }
+
         uint16_t spread = LineSensor_GetRawSpread(sensor_values);
         float raw_error = LineSensor_GetInterpolatedValue(sensor_values);
 
@@ -475,10 +539,8 @@ void App_LineCtrlTask(void *argument)
             /* === LINHA VIVEL: PID normal === */
             lost_counter = 0;
 
-            /* Filtra erro suavemente */
-            filtered_line_error = filtered_line_error * 0.5f + raw_error * 0.5f;
+            filtered_line_error = filtered_line_error * 0.6f + raw_error * 0.4f;
 
-            /* SEMPRE atualiza direcao conhecida */
             last_valid_error = filtered_line_error;
 
             float abs_err = filtered_line_error;
@@ -488,21 +550,16 @@ void App_LineCtrlTask(void *argument)
 
             float correction = PID_Compute(&line_pid, 0.0f, filtered_line_error);
 
-            /* Velocidade: boost na largada, desacelera em curva */
-            float base = app_config.base_speed;
+            /* Rampa na largada: correcao sobe aos poucos nos primeiros 500ms */
             uint32_t follow_elapsed = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
-            if (follow_elapsed < FOLLOW_BOOST_MS) {
-                base = FOLLOW_BOOST_SPEED;
-            } else {
-                float slowdown = abs_err / LINE_ERROR_FULL_SCALE;
-                if (slowdown > 1.0f) {
-                    slowdown = 1.0f;
-                }
-                base = app_config.base_speed - (app_config.base_speed - FOLLOW_MIN_SPEED) * LINE_CURVE_SLOWDOWN * slowdown;
+            if (follow_elapsed < FOLLOW_RAMP_MS) {
+                correction *= (float)follow_elapsed / (float)FOLLOW_RAMP_MS;
             }
 
-            cmd.vel_left = base + correction;
-            cmd.vel_right = base - correction;
+            float base = app_config.base_speed;
+
+            cmd.vel_left = base - correction;
+            cmd.vel_right = base + correction;
 
             if (cmd.vel_left < 0.0f) cmd.vel_left = 0.0f;
             if (cmd.vel_right < 0.0f) cmd.vel_right = 0.0f;
@@ -519,17 +576,14 @@ void App_LineCtrlTask(void *argument)
             /* NAO zera last_valid_error! Usa para saber direcao */
             /* Pivot lento: uma roda parada, outra gira devagar */
             if (last_valid_error > 0.02f) {
-                /* Linha estava a direita: gira devagar para direita */
-                cmd.vel_left = 0.0f;
-                cmd.vel_right = LINE_SEARCH_POWER;
-            } else if (last_valid_error < -0.02f) {
-                /* Linha estava a esquerda: gira devagar para esquerda */
                 cmd.vel_left = LINE_SEARCH_POWER;
                 cmd.vel_right = 0.0f;
-            } else {
-                /* Sem direcao: gira para direita (default) */
+            } else if (last_valid_error < -0.02f) {
                 cmd.vel_left = 0.0f;
                 cmd.vel_right = LINE_SEARCH_POWER;
+            } else {
+                cmd.vel_left = LINE_SEARCH_POWER;
+                cmd.vel_right = 0.0f;
             }
 
             /* Reset PID para nao acumular erro durante busca */
@@ -555,11 +609,44 @@ void App_LineCtrlTask(void *argument)
     }
 }
 
+extern ADC_HandleTypeDef hadc2;
+
+static float App_ReadBatteryPct(void)
+{
+    ADC_ChannelConfTypeDef sConfig = {0};
+    sConfig.Channel = ADC_CHANNEL_4;
+    sConfig.Rank = ADC_REGULAR_RANK_1;
+    sConfig.SamplingTime = ADC_SAMPLETIME_47CYCLES_5;
+    sConfig.SingleDiff = ADC_SINGLE_ENDED;
+    sConfig.OffsetNumber = ADC_OFFSET_NONE;
+    HAL_ADC_ConfigChannel(&hadc2, &sConfig);
+    HAL_ADC_Start(&hadc2);
+    HAL_ADC_PollForConversion(&hadc2, 10);
+    uint32_t raw = HAL_ADC_GetValue(&hadc2);
+    HAL_ADC_Stop(&hadc2);
+
+    /* Divisor resistivo: Vbat -> R1/R2 -> ADC (3.3V ref, 12-bit)
+       Ajustar a escala conforme o divisor real do robo.
+       Assumindo: 2 celulas LiPo (6.0V~8.4V), divisor 1:2 -> 3.0~4.2V no ADC */
+    float voltage = ((float)raw / 4095.0f) * 3.3f * 2.0f;
+    float pct = (voltage - 6.0f) / (8.4f - 6.0f) * 100.0f;
+    if (pct < 0.0f) pct = 0.0f;
+    if (pct > 100.0f) pct = 100.0f;
+    return pct;
+}
+
 void App_MotorCtrlTask(void *argument)
 {
     (void)argument;
 
     Encoder_Init();
+
+    float total_dist_left = 0.0f;
+    float total_dist_right = 0.0f;
+    float heading_deg = 0.0f;
+    int32_t prev_left = 0;
+    int32_t prev_right = 0;
+    uint32_t telem_counter = 0;
 
     TickType_t last_wake = xTaskGetTickCount();
 
@@ -567,6 +654,31 @@ void App_MotorCtrlTask(void *argument)
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(10));
 
         Encoder_Update();
+
+        int32_t cur_left = Encoder_GetCountLeft();
+        int32_t cur_right = Encoder_GetCountRight();
+        int32_t dl = cur_left - prev_left;
+        int32_t dr = cur_right - prev_right;
+        prev_left = cur_left;
+        prev_right = cur_right;
+
+        float dist_l = (float)dl * CM_PER_PULSE;
+        float dist_r = (float)dr * CM_PER_PULSE;
+        total_dist_left += dist_l;
+        total_dist_right += dist_r;
+
+        heading_deg += (dist_r - dist_l) / WHEEL_BASE_CM * (180.0f / 3.14159f);
+
+        telem_counter++;
+        if (telem_counter >= 10) {
+            telem_counter = 0;
+            float avg_dist = (total_dist_left + total_dist_right) / 2.0f;
+            float avg_speed = ((Encoder_GetSpeedLeft() + Encoder_GetSpeedRight()) / 2.0f)
+                              * WHEEL_CIRCUM_CM;
+            Telemetry_SetDistSpeed(avg_dist, avg_speed);
+            Telemetry_SetHeading(heading_deg);
+            Telemetry_SetBattery(App_ReadBatteryPct());
+        }
 
         MotorCmd_t cmd = g_motor_cmd;
 

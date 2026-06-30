@@ -20,12 +20,12 @@ extern ADC_HandleTypeDef hadc5;
 #define LINE_MIN_RAW_SPREAD  6U
 #define LINE_MIN_CALIB_RANGE 40U
 #define LINE_ERROR_CLAMP     0.35f
-#define LINE_OUTLIER_DELTA   40U
-#define LINE_ADC_MAX_VALID   550U
+#define LINE_OUTLIER_DELTA   120U
+#define LINE_ADC_MAX_VALID   3500U
 
 static uint16_t s_min[LINE_SENSOR_COUNT];
 static uint16_t s_max[LINE_SENSOR_COUNT];
-static float s_weights[LINE_SENSOR_COUNT] = {-0.5f, -1.0f, 0.0f, 1.0f, 0.5f};
+static float s_weights[LINE_SENSOR_COUNT] = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f};
 
 static uint8_t LineSensor_CountRawActive(const uint16_t values[LINE_SENSOR_COUNT]);
 
@@ -396,52 +396,23 @@ float LineSensor_GetInterpolatedValue(uint16_t values[LINE_SENSOR_COUNT])
     uint16_t spread = LineSensor_GetRawSpread(values);
 
     if (spread < LINE_MIN_RAW_SPREAD) {
-        /* Linha perdida: retorna erro maximo na direcao do ultimo sensor ativo */
-        uint8_t line_idx = 0U;
-        for (uint8_t i = 1U; i < LINE_SENSOR_COUNT; i++) {
-            if (s_polarity == LINE_POLARITY_DARK) {
-                if (values[i] < values[line_idx]) {
-                    line_idx = i;
-                }
-            } else if (values[i] > values[line_idx]) {
-                line_idx = i;
-            }
-        }
-        float pos = ((float)line_idx - 2.0f) / 2.0f;
-        if (pos > 0.0f) {
-            return LINE_ERROR_CLAMP;
-        }
-        if (pos < 0.0f) {
-            return -LINE_ERROR_CLAMP;
-        }
         return 0.0f;
     }
 
-    /* Interpolacao ponderada simples (igual ao professor) */
-    float neg_max = 0.0f;
-    float pos_max = 0.0f;
-    float value = 0.0f;
+    float centroid = LineSensor_GetCentroidIndex(values);
+    float error = (centroid - s_center_target) / 2.0f;
 
-    for (uint8_t i = 0; i < LINE_SENSOR_COUNT; i++) {
-        float sensor_value = LineSensor_Normalize(i, values[i]);
-
-        if (s_weights[i] > 0.0f) {
-            pos_max += s_weights[i];
-        } else {
-            neg_max -= s_weights[i];
-        }
-
-        value += sensor_value * s_weights[i];
+    /* Leituras com spread muito alto sao instaveis (largada, cruzamento) */
+    if (spread > 65U) {
+        error *= 65.0f / (float)spread;
     }
 
-    if (value > 0.0f) {
-        return LineSensor_ClampError(value / pos_max);
-    }
-    if (value < 0.0f) {
-        return LineSensor_ClampError(value / neg_max);
+    /* Zona morta: no centro, anda reto sem corrigir */
+    if (error > -0.05f && error < 0.05f) {
+        return 0.0f;
     }
 
-    return 0.0f;
+    return LineSensor_ClampError(error);
 }
 
 static uint8_t LineSensor_CountRawActive(const uint16_t values[LINE_SENSOR_COUNT])
