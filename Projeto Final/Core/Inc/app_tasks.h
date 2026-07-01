@@ -43,4 +43,9 @@ extern volatile MotorCmd_t g_motor_cmd;
 void App_LineCtrlTask(void *argument);
 void App_MotorCtrlTask(void *argument);
 
+/* Ajuste de PID em tempo real (Bluetooth $SET) */
+void App_SetLinePidGains(float kp, float ki, float kd);
+void App_SetBaseSpeed(float speed);
+void App_GetLinePidConfig(float *kp, float *ki, float *kd, float *speed);
+
 #endif /* APP_TASKS_H */

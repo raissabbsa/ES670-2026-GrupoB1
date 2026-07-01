@@ -15,13 +15,13 @@ extern osMessageQueueId_t queueMotorCmdHandle;
 extern UART_HandleTypeDef hlpuart1;
 
 AppConfig_t app_config = {
-    .line_Kp = 0.45f,
+    .line_Kp = 0.40f,
     .line_Ki = 0.0f,
     .line_Kd = 0.0f,
     .speed_Kp = 1.0f,
     .speed_Ki = 0.5f,
     .speed_Kd = 0.0f,
-    .base_speed = 0.35f,
+    .base_speed = 0.42f,
     .sensor_threshold = 0,
     .max_time_ms = 90000,
 };
@@ -32,22 +32,24 @@ volatile MotorCmd_t g_motor_cmd = {0.0f, 0.0f};
 #define LINE_CORRECTION_MAX      0.18f
 #define LINE_CALIBRATION_MS      650U
 #define LINE_LOST_STOP_COUNT     200U
-#define FOLLOW_RAMP_MS           500U
+#define LINE_LOST_DEBOUNCE       4U
+#define FOLLOW_RAMP_MS           400U
 #define LINE_LOST_SPREAD_MIN     8U
 #define DEBUG_TX_INTERVAL_MS     500U
 #define FOLLOW_TX_INTERVAL_MS    400U
 #define LINE_OFFSET_MIN_SPREAD   38U
-#define LINE_CENTER_VALID_MIN    2.2f
-#define LINE_CENTER_VALID_MAX    2.9f
+#define LINE_CENTER_VALID_MIN    1.5f
+#define LINE_CENTER_VALID_MAX    3.5f
 #define LINE_CENTER_MIN_SAMPLES  12U
 #define FOLLOW_MAX_SPEED         0.55f
-#define FOLLOW_MIN_SPEED         0.30f
-#define FOLLOW_BOOST_MS          600U
-#define FOLLOW_BOOST_SPEED       0.48f
+#define FOLLOW_MIN_SPEED         0.32f
+#define FOLLOW_BOOST_MS          800U
+#define FOLLOW_BOOST_SPEED       0.50f
 #define LINE_CURVE_SLOWDOWN      0.40f
 #define LINE_ERROR_FULL_SCALE    0.25f
-#define LINE_SEARCH_POWER        0.35f
-#define ALIGN_SPIN_POWER         0.20f
+#define LINE_SEARCH_SLOW         0.28f
+#define LINE_SEARCH_FAST         0.42f
+#define ALIGN_SPIN_POWER         0.35f
 #define ALIGN_PIVOT_POWER        0.22f
 #define ALIGN_LINE_SPREAD_MIN    25U
 #define ALIGN_DETECT_STREAK      6U
@@ -69,6 +71,27 @@ static void App_ApplyMotorCmd(MotorCmd_t *cmd)
 {
     g_motor_cmd = *cmd;
     osMessageQueuePut(queueMotorCmdHandle, cmd, 0, 0);
+}
+
+/* Garante potencia minima nas duas rodas em seguimento (preserva diferenca). */
+static void App_BoostFollowWheels(MotorCmd_t *cmd)
+{
+    if (cmd->vel_left <= 0.0f || cmd->vel_right <= 0.0f) {
+        return;
+    }
+
+    float lo = (cmd->vel_left < cmd->vel_right) ? cmd->vel_left : cmd->vel_right;
+    if (lo < FOLLOW_MIN_SPEED) {
+        float boost = FOLLOW_MIN_SPEED - lo;
+        cmd->vel_left += boost;
+        cmd->vel_right += boost;
+        if (cmd->vel_left > FOLLOW_MAX_SPEED) {
+            cmd->vel_left = FOLLOW_MAX_SPEED;
+        }
+        if (cmd->vel_right > FOLLOW_MAX_SPEED) {
+            cmd->vel_right = FOLLOW_MAX_SPEED;
+        }
+    }
 }
 
 static uint8_t App_GetLineSensorIndex(const uint16_t values[LINE_SENSOR_COUNT])
@@ -149,6 +172,54 @@ static void App_DebugUartSend(const char *msg)
     }
 }
 
+static PID_Controller s_line_pid;
+static volatile uint8_t s_line_pid_gains_pending = 0U;
+
+void App_SetLinePidGains(float kp, float ki, float kd)
+{
+    app_config.line_Kp = kp;
+    app_config.line_Ki = ki;
+    app_config.line_Kd = kd;
+    s_line_pid_gains_pending = 1U;
+}
+
+void App_SetBaseSpeed(float speed)
+{
+    if (speed < 0.0f) {
+        speed = 0.0f;
+    }
+    if (speed > 1.0f) {
+        speed = 1.0f;
+    }
+    app_config.base_speed = speed;
+}
+
+void App_GetLinePidConfig(float *kp, float *ki, float *kd, float *speed)
+{
+    if (kp != NULL) {
+        *kp = app_config.line_Kp;
+    }
+    if (ki != NULL) {
+        *ki = app_config.line_Ki;
+    }
+    if (kd != NULL) {
+        *kd = app_config.line_Kd;
+    }
+    if (speed != NULL) {
+        *speed = app_config.base_speed;
+    }
+}
+
+static void App_ApplyPendingLinePidGains(void)
+{
+    if (s_line_pid_gains_pending == 0U) {
+        return;
+    }
+
+    PID_SetGains(&s_line_pid, app_config.line_Kp, app_config.line_Ki, app_config.line_Kd);
+    s_line_pid_gains_pending = 0U;
+}
+
 void App_LineCtrlTask(void *argument)
 {
     (void)argument;
@@ -158,8 +229,7 @@ void App_LineCtrlTask(void *argument)
     App_DebugUartSend("Robo OK - serial 115200\r\n");
     App_DebugUartSend("Enter=inicia (alinha sozinho)\r\n");
 
-    PID_Controller line_pid;
-    PID_Init(&line_pid, app_config.line_Kp, app_config.line_Ki,
+    PID_Init(&s_line_pid, app_config.line_Kp, app_config.line_Ki,
              app_config.line_Kd, 0.02f, -LINE_CORRECTION_MAX, LINE_CORRECTION_MAX);
 
     uint16_t sensor_values[LINE_SENSOR_COUNT];
@@ -188,11 +258,14 @@ void App_LineCtrlTask(void *argument)
     float filtered_line_error = 0.0f;
     uint32_t crossing_start_tick = 0;
     uint32_t ultrasonic_cycle = 0;
+    uint8_t line_lost_streak = 0;
 
     TickType_t last_wake = xTaskGetTickCount();
 
     for (;;) {
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(20));
+
+        App_ApplyPendingLinePidGains();
 
         if (follower_state == STATE_DEBUG && prev_state != STATE_DEBUG) {
             last_debug_tx = 0;
@@ -224,8 +297,10 @@ void App_LineCtrlTask(void *argument)
                 LineSensor_SetPolarity(
                     LineSensor_DetectPolarityFromLayout(sensor_values));
                 calib_polarity_done = 1;
-                follower_state = STATE_CALIBRATING;
-                App_DebugUartSend("Ja na fita - calibrando\r\n");
+                align_phase = ALIGN_PHASE_CREEP;
+                align_creep_start = xTaskGetTickCount();
+                align_ok_streak = 0U;
+                App_DebugUartSend("Ja na fita - centralizando\r\n");
             } else {
                 align_phase = ALIGN_PHASE_SPIN;
                 App_DebugUartSend("=== ALINHANDO ===\r\n");
@@ -255,7 +330,8 @@ void App_LineCtrlTask(void *argument)
             follow_msg_sent = 0;
             last_follow_tx = 0;
             filtered_line_error = 0.0f;
-            PID_Reset(&line_pid);
+            line_lost_streak = 0;
+            PID_Reset(&s_line_pid);
         }
         prev_state = follower_state;
 
@@ -405,7 +481,7 @@ void App_LineCtrlTask(void *argument)
 
                 HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
                 filtered_line_error = 0.0f;
-                PID_Reset(&line_pid);
+                PID_Reset(&s_line_pid);
                 follower_state = STATE_FOLLOWING;
             }
             continue;
@@ -448,7 +524,7 @@ void App_LineCtrlTask(void *argument)
             osMessageQueuePut(queueMotorCmdHandle, &cmd, 0, 0);
             Motor_Brake();
             follower_state = STATE_STOPPED;
-            PID_Reset(&line_pid);
+            PID_Reset(&s_line_pid);
             App_DebugUartSend("=== PAROU ===\r\n");
             Telemetry_SetState((uint8_t)STATE_STOPPED);
             continue;
@@ -462,7 +538,7 @@ void App_LineCtrlTask(void *argument)
             if (cross_elapsed >= CROSSING_STRAIGHT_MS) {
                 follower_state = STATE_FOLLOWING;
                 lost_counter = 0;
-                PID_Reset(&line_pid);
+                PID_Reset(&s_line_pid);
                 filtered_line_error = 0.0f;
                 App_DebugUartSend("Cruzamento OK\r\n");
             }
@@ -536,26 +612,39 @@ void App_LineCtrlTask(void *argument)
         float raw_error = LineSensor_GetInterpolatedValue(sensor_values);
 
         if (spread >= LINE_LOST_SPREAD_MIN) {
-            /* === LINHA VIVEL: PID normal === */
+            line_lost_streak = 0U;
             lost_counter = 0;
 
             filtered_line_error = filtered_line_error * 0.6f + raw_error * 0.4f;
-
             last_valid_error = filtered_line_error;
 
-            float abs_err = filtered_line_error;
-            if (abs_err < 0.0f) {
-                abs_err = -abs_err;
-            }
+            float correction = PID_Compute(&s_line_pid, 0.0f, filtered_line_error);
 
-            float correction = PID_Compute(&line_pid, 0.0f, filtered_line_error);
-
-            /* Rampa na largada: correcao sobe aos poucos nos primeiros 500ms */
             uint32_t follow_elapsed = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
             if (follow_elapsed < FOLLOW_RAMP_MS) {
                 correction *= (float)follow_elapsed / (float)FOLLOW_RAMP_MS;
             }
 
+            float base = app_config.base_speed;
+            if (follow_elapsed < FOLLOW_BOOST_MS) {
+                base = FOLLOW_BOOST_SPEED;
+            }
+
+            cmd.vel_left = base - correction;
+            cmd.vel_right = base + correction;
+
+            if (cmd.vel_left < 0.0f) cmd.vel_left = 0.0f;
+            if (cmd.vel_right < 0.0f) cmd.vel_right = 0.0f;
+            if (cmd.vel_left > FOLLOW_MAX_SPEED) cmd.vel_left = FOLLOW_MAX_SPEED;
+            if (cmd.vel_right > FOLLOW_MAX_SPEED) cmd.vel_right = FOLLOW_MAX_SPEED;
+
+            App_BoostFollowWheels(&cmd);
+        } else if (line_lost_streak < LINE_LOST_DEBOUNCE) {
+            /* Glitch de sensor (spr=0 momentaneo): continua com ultimo erro */
+            line_lost_streak++;
+            filtered_line_error = last_valid_error;
+
+            float correction = PID_Compute(&s_line_pid, 0.0f, filtered_line_error);
             float base = app_config.base_speed;
 
             cmd.vel_left = base - correction;
@@ -565,29 +654,28 @@ void App_LineCtrlTask(void *argument)
             if (cmd.vel_right < 0.0f) cmd.vel_right = 0.0f;
             if (cmd.vel_left > FOLLOW_MAX_SPEED) cmd.vel_left = FOLLOW_MAX_SPEED;
             if (cmd.vel_right > FOLLOW_MAX_SPEED) cmd.vel_right = FOLLOW_MAX_SPEED;
+
+            App_BoostFollowWheels(&cmd);
         } else {
-            /* === LINHA PERDIDA: BUSCA LENTA === */
+            /* === LINHA PERDIDA: busca em arco (duas rodas) === */
             lost_counter++;
             if (lost_counter > LINE_LOST_STOP_COUNT) {
                 follower_state = STATE_STOPPING;
                 continue;
             }
 
-            /* NAO zera last_valid_error! Usa para saber direcao */
-            /* Pivot lento: uma roda parada, outra gira devagar */
             if (last_valid_error > 0.02f) {
-                cmd.vel_left = LINE_SEARCH_POWER;
-                cmd.vel_right = 0.0f;
+                cmd.vel_left = LINE_SEARCH_SLOW;
+                cmd.vel_right = LINE_SEARCH_FAST;
             } else if (last_valid_error < -0.02f) {
-                cmd.vel_left = 0.0f;
-                cmd.vel_right = LINE_SEARCH_POWER;
+                cmd.vel_left = LINE_SEARCH_FAST;
+                cmd.vel_right = LINE_SEARCH_SLOW;
             } else {
-                cmd.vel_left = LINE_SEARCH_POWER;
-                cmd.vel_right = 0.0f;
+                cmd.vel_left = LINE_SEARCH_SLOW;
+                cmd.vel_right = LINE_SEARCH_FAST;
             }
 
-            /* Reset PID para nao acumular erro durante busca */
-            PID_Reset(&line_pid);
+            PID_Reset(&s_line_pid);
         }
 
         App_ApplyMotorCmd(&cmd);
@@ -597,7 +685,7 @@ void App_LineCtrlTask(void *argument)
             char buf[128];
             int len = snprintf(buf, sizeof(buf),
                 "F %s vl=%d vr=%d adj=%d spr=%u\r\n",
-                (lost_counter > 0) ? "BUSCA" : "ON",
+                (lost_counter > 0 && line_lost_streak >= LINE_LOST_DEBOUNCE) ? "BUSCA" : "ON",
                 (int)(cmd.vel_left * 100.0f),
                 (int)(cmd.vel_right * 100.0f),
                 (int)(filtered_line_error * 100.0f),

@@ -49,23 +49,48 @@ static void BT_Send(const char *msg)
 
 static void BT_ProcessLine(char *line)
 {
+    if (strncmp(line, "$GET,", 5) == 0) {
+        char *param = line + 5;
+
+        if (strcmp(param, "PID") == 0) {
+            float kp, ki, kd, spd;
+            char buf[64];
+            App_GetLinePidConfig(&kp, &ki, &kd, &spd);
+            int len = snprintf(buf, sizeof(buf),
+                "$PID,%.3f,%.3f,%.3f,%.3f\n", kp, ki, kd, spd);
+            if (len > 0 && len < (int)sizeof(buf)) {
+                BT_Send(buf);
+            }
+        }
+        return;
+    }
+
     if (strncmp(line, "$SET,", 5) == 0) {
         char *param = line + 5;
         char *comma = strchr(param, ',');
-        if (!comma) return;
+        if (!comma) {
+            BT_Send("$ERR\n");
+            return;
+        }
         *comma = '\0';
         float val = (float)atof(comma + 1);
+        uint8_t ok = 0U;
 
         if (strcmp(param, "KP") == 0) {
-            app_config.line_Kp = val;
+            App_SetLinePidGains(val, app_config.line_Ki, app_config.line_Kd);
+            ok = 1U;
         } else if (strcmp(param, "KI") == 0) {
-            app_config.line_Ki = val;
+            App_SetLinePidGains(app_config.line_Kp, val, app_config.line_Kd);
+            ok = 1U;
         } else if (strcmp(param, "KD") == 0) {
-            app_config.line_Kd = val;
+            App_SetLinePidGains(app_config.line_Kp, app_config.line_Ki, val);
+            ok = 1U;
         } else if (strcmp(param, "SPD") == 0) {
-            app_config.base_speed = val;
+            App_SetBaseSpeed(val);
+            ok = 1U;
         }
-        BT_Send("$OK\n");
+
+        BT_Send(ok ? "$OK\n" : "$ERR\n");
         return;
     }
 
@@ -75,19 +100,19 @@ static void BT_ProcessLine(char *line)
 
         if (strcmp(cmd, "FWD") == 0) {
             follower_state = STATE_MANUAL;
-            mcmd.vel_left = 0.35f;
-            mcmd.vel_right = 0.35f;
+            mcmd.vel_left = 0.50f;
+            mcmd.vel_right = 0.50f;
         } else if (strcmp(cmd, "REV") == 0) {
             follower_state = STATE_MANUAL;
-            mcmd.vel_left = -0.35f;
-            mcmd.vel_right = -0.35f;
+            mcmd.vel_left = -0.50f;
+            mcmd.vel_right = -0.50f;
         } else if (strcmp(cmd, "LEFT") == 0) {
             follower_state = STATE_MANUAL;
             mcmd.vel_left = 0.0f;
-            mcmd.vel_right = 0.35f;
+            mcmd.vel_right = 0.50f;
         } else if (strcmp(cmd, "RIGHT") == 0) {
             follower_state = STATE_MANUAL;
-            mcmd.vel_left = 0.35f;
+            mcmd.vel_left = 0.50f;
             mcmd.vel_right = 0.0f;
         } else if (strcmp(cmd, "STOP") == 0) {
             follower_state = STATE_IDLE;

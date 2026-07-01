@@ -5,8 +5,8 @@
 
 /* TIM1 configurado como no exemplo do professor: ARR = 999 */
 #define MOTOR_PWM_MAX 999U
-#define MOTOR_MIN_START_POWER 0.38f
-#define MOTOR_MIN_TURN_POWER  0.28f
+#define MOTOR_MIN_START_POWER 0.40f
+#define MOTOR_MIN_TURN_POWER  0.30f
 
 void Motor_Init(void);
 void Motor_SetPower(float left, float right);

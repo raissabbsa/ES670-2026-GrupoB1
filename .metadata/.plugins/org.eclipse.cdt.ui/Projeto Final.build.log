@@ -1,10 +1,10 @@
-22:23:47 **** Incremental Build of configuration Debug for project Projeto Final ****
+21:43:25 **** Incremental Build of configuration Debug for project Projeto Final ****
 make -j8 all 
 arm-none-eabi-size   Projeto\ Final.elf 
    text	   data	    bss	    dec	    hex	filename
-  85204	    536	  14928	 100668	  1893c	Projeto Final.elf
+  86356	    536	  22128	 109020	  1a9dc	Projeto Final.elf
 Finished building: default.size.stdout
  
 
-22:23:48 Build Finished. 0 errors, 0 warnings. (took 633ms)
+21:43:25 Build Finished. 0 errors, 0 warnings. (took 353ms)
 

@@ -21,7 +21,7 @@ extern ADC_HandleTypeDef hadc5;
 #define LINE_MIN_CALIB_RANGE 40U
 #define LINE_ERROR_CLAMP     0.35f
 #define LINE_OUTLIER_DELTA   120U
-#define LINE_ADC_MAX_VALID   3500U
+#define LINE_ADC_MAX_VALID   2000U
 
 static uint16_t s_min[LINE_SENSOR_COUNT];
 static uint16_t s_max[LINE_SENSOR_COUNT];
@@ -115,7 +115,13 @@ static float LineSensor_GetDifferentialValue(const uint16_t values[LINE_SENSOR_C
     float value = 0.0f;
 
     for (uint8_t i = 0; i < LINE_SENSOR_COUNT; i++) {
-        float diff = mean - (float)values[i];
+        float diff;
+
+        if (s_polarity == LINE_POLARITY_DARK) {
+            diff = mean - (float)values[i];
+        } else {
+            diff = (float)values[i] - mean;
+        }
 
         if (s_weights[i] > 0.0f) {
             pos_max += s_weights[i];
@@ -136,7 +142,15 @@ static float LineSensor_GetDifferentialValue(const uint16_t values[LINE_SENSOR_C
         return 0.0f;
     }
 
-    return value / denom;
+    float error = value / denom;
+    if (error > LINE_ERROR_CLAMP) {
+        error = LINE_ERROR_CLAMP;
+    }
+    if (error < -LINE_ERROR_CLAMP) {
+        error = -LINE_ERROR_CLAMP;
+    }
+
+    return error;
 }
 
 static float LineSensor_GetThickLineError(const uint16_t values[LINE_SENSOR_COUNT])
@@ -391,7 +405,7 @@ float LineSensor_GetCenterTarget(void)
     return s_center_target;
 }
 
-float LineSensor_GetInterpolatedValue(uint16_t values[LINE_SENSOR_COUNT])
+static float LineSensor_GetPairBalanceError(const uint16_t values[LINE_SENSOR_COUNT])
 {
     uint16_t spread = LineSensor_GetRawSpread(values);
 
@@ -399,16 +413,80 @@ float LineSensor_GetInterpolatedValue(uint16_t values[LINE_SENSOR_COUNT])
         return 0.0f;
     }
 
-    float centroid = LineSensor_GetCentroidIndex(values);
-    float error = (centroid - s_center_target) / 2.0f;
+    float left = ((float)values[0] + (float)values[1]) * 0.5f;
+    float right = ((float)values[3] + (float)values[4]) * 0.5f;
+    float diff;
 
-    /* Leituras com spread muito alto sao instaveis (largada, cruzamento) */
-    if (spread > 65U) {
-        error *= 65.0f / (float)spread;
+    if (s_polarity == LINE_POLARITY_DARK) {
+        diff = left - right;
+    } else {
+        diff = right - left;
     }
 
-    /* Zona morta: no centro, anda reto sem corrigir */
-    if (error > -0.05f && error < 0.05f) {
+    float error = diff / (float)spread;
+
+    if (error > LINE_ERROR_CLAMP) {
+        error = LINE_ERROR_CLAMP;
+    }
+    if (error < -LINE_ERROR_CLAMP) {
+        error = -LINE_ERROR_CLAMP;
+    }
+
+    return error;
+}
+
+static uint8_t LineSensor_UseDifferentialError(const uint16_t values[LINE_SENSOR_COUNT],
+                                              uint16_t spread)
+{
+    uint8_t active = LineSensor_CountRawActive(values);
+
+    if (LineSensor_IsOnThickLine(values)) {
+        return 1U;
+    }
+
+    if (active >= 2U) {
+        return 1U;
+    }
+
+    /* Fita grossa: spread moderado com varios sensores parecidos */
+    if (spread >= LINE_MIN_RAW_SPREAD && spread < 90U && active >= 1U) {
+        float centroid = LineSensor_GetCentroidIndex(values);
+        float offset = centroid - s_center_target;
+
+        if (offset < 0.0f) {
+            offset = -offset;
+        }
+
+        if (offset > 0.35f) {
+            return 1U;
+        }
+    }
+
+    return 0U;
+}
+
+float LineSensor_GetInterpolatedValue(uint16_t values[LINE_SENSOR_COUNT])
+{
+    uint16_t spread = LineSensor_GetRawSpread(values);
+
+    if (spread < LINE_MIN_RAW_SPREAD && !LineSensor_IsOnThickLine(values)) {
+        return 0.0f;
+    }
+
+    float error;
+
+    if (LineSensor_UseDifferentialError(values, spread)) {
+        error = LineSensor_GetPairBalanceError(values);
+    } else {
+        float centroid = LineSensor_GetCentroidIndex(values);
+        error = (centroid - s_center_target) / 2.0f;
+
+        if (spread > 65U) {
+            error *= 65.0f / (float)spread;
+        }
+    }
+
+    if (error > -0.08f && error < 0.08f) {
         return 0.0f;
     }
 
