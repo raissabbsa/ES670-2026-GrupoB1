@@ -23,8 +23,16 @@ extern ADC_HandleTypeDef hadc5;
 #define LINE_ERROR_CLAMP     0.35f
 #define LINE_OUTLIER_DELTA   120U
 #define LINE_ADC_MAX_VALID   2000U
-#define LINE_CALIB_DEFAULT_MIN  120U
-#define LINE_CALIB_DEFAULT_MAX  900U
+#define LINE_MIN_NORM_SPREAD    0.18f
+#define LINE_NORM_MARGIN_MIN    0.08f
+#define LINE_OFFSET_MIN_SPREAD  38U
+
+/* Defaults por sensor (5 valores).
+ * Apertados para o range real (~150-280 raw nos logs do grupo B1)
+ * para que o spread normalizado fique util mesmo sem calibracao dinamica.
+ * Ajustar apos medicao real com a fita do grupo. */
+static const uint16_t LINE_CALIB_DEFAULT_MIN_S[LINE_SENSOR_COUNT] = { 150, 150, 150, 150, 150 };
+static const uint16_t LINE_CALIB_DEFAULT_MAX_S[LINE_SENSOR_COUNT] = { 280, 280, 280, 280, 280 };
 
 static uint16_t s_min[LINE_SENSOR_COUNT];
 static uint16_t s_max[LINE_SENSOR_COUNT];
@@ -93,8 +101,8 @@ static float LineSensor_Normalize(uint8_t index, uint16_t raw)
 static void LineSensor_LoadDefaultCalibration(void)
 {
     for (uint8_t i = 0U; i < LINE_SENSOR_COUNT; i++) {
-        s_min[i] = LINE_CALIB_DEFAULT_MIN;
-        s_max[i] = LINE_CALIB_DEFAULT_MAX;
+        s_min[i] = LINE_CALIB_DEFAULT_MIN_S[i];
+        s_max[i] = LINE_CALIB_DEFAULT_MAX_S[i];
         s_last_valid_min[i] = s_min[i];
         s_last_valid_max[i] = s_max[i];
     }
@@ -348,15 +356,41 @@ float LineSensor_GetCentroidIndex(const uint16_t values[LINE_SENSOR_COUNT])
 {
     if (s_calib_valid != 0U) {
         float normalized[LINE_SENSOR_COUNT];
+        float norm_min;
+        float norm_max;
+        float norm_mean = 0.0f;
         float sum_w = 0.0f;
         float sum_pos = 0.0f;
 
         LineSensor_GetNormalizedAll(values, normalized);
+        norm_min = normalized[0];
+        norm_max = normalized[0];
+        for (uint8_t i = 0U; i < LINE_SENSOR_COUNT; i++) {
+            if (normalized[i] < norm_min) {
+                norm_min = normalized[i];
+            }
+            if (normalized[i] > norm_max) {
+                norm_max = normalized[i];
+            }
+            norm_mean += normalized[i];
+        }
+        norm_mean /= (float)LINE_SENSOR_COUNT;
+
+        float norm_spread = norm_max - norm_min;
+        if (norm_spread < LINE_MIN_NORM_SPREAD) {
+            return 2.0f;
+        }
+
+        float margin = norm_spread * 0.35f;
+        if (margin < LINE_NORM_MARGIN_MIN) {
+            margin = LINE_NORM_MARGIN_MIN;
+        }
+
         for (uint8_t i = 0U; i < LINE_SENSOR_COUNT; i++) {
             float threshold = (i == 2U) ? LINE_CENTER_ACTIVE_THRESHOLD : LINE_SIDE_ACTIVE_THRESHOLD;
             float w = normalized[i];
 
-            if (w < threshold) {
+            if (w < threshold || w < (norm_mean + margin)) {
                 continue;
             }
 
@@ -367,6 +401,8 @@ float LineSensor_GetCentroidIndex(const uint16_t values[LINE_SENSOR_COUNT])
         if (sum_w > 0.01f) {
             return sum_pos / sum_w;
         }
+
+        return 2.0f;
     }
 
     uint16_t spread = LineSensor_GetRawSpread(values);
@@ -515,7 +551,12 @@ float LineSensor_GetInterpolatedValue(uint16_t values[LINE_SENSOR_COUNT])
         float centroid = LineSensor_GetCentroidIndex(values);
         float error = (centroid - s_center_target) / 2.0f;
 
-        if (error > -0.08f && error < 0.08f) {
+        /* Zona morta adaptativa: aplica dead-zone maior quando ha spread
+         * suficiente, menor em leitura ruidosa de reta. */
+        uint16_t spread = LineSensor_GetRawSpread(values);
+        float dead_zone = (spread >= LINE_OFFSET_MIN_SPREAD) ? 0.05f : 0.08f;
+
+        if (error > -dead_zone && error < dead_zone) {
             return 0.0f;
         }
 
@@ -541,7 +582,8 @@ float LineSensor_GetInterpolatedValue(uint16_t values[LINE_SENSOR_COUNT])
         }
     }
 
-    if (error > -0.08f && error < 0.08f) {
+    float dead_zone = (spread >= LINE_OFFSET_MIN_SPREAD) ? 0.05f : 0.08f;
+    if (error > -dead_zone && error < dead_zone) {
         return 0.0f;
     }
 
@@ -586,6 +628,9 @@ static uint8_t LineSensor_CountRawActive(const uint16_t values[LINE_SENSOR_COUNT
 static uint8_t LineSensor_CountNormalizedActive(const uint16_t values[LINE_SENSOR_COUNT])
 {
     float normalized[LINE_SENSOR_COUNT];
+    float norm_min;
+    float norm_max;
+    float norm_mean = 0.0f;
     uint8_t count = 0U;
 
     if (s_calib_valid == 0U) {
@@ -593,12 +638,55 @@ static uint8_t LineSensor_CountNormalizedActive(const uint16_t values[LINE_SENSO
     }
 
     LineSensor_GetNormalizedAll(values, normalized);
+    norm_min = normalized[0];
+    norm_max = normalized[0];
 
     for (uint8_t i = 0U; i < LINE_SENSOR_COUNT; i++) {
-        float threshold = (i == 2U) ? LINE_CENTER_ACTIVE_THRESHOLD : LINE_SIDE_ACTIVE_THRESHOLD;
+        if (normalized[i] < norm_min) {
+            norm_min = normalized[i];
+        }
+        if (normalized[i] > norm_max) {
+            norm_max = normalized[i];
+        }
+        norm_mean += normalized[i];
+    }
+    norm_mean /= (float)LINE_SENSOR_COUNT;
 
-        if (normalized[i] >= threshold) {
-            count++;
+    float norm_spread = norm_max - norm_min;
+
+    /* Threshold absoluto: so conta sensor ativo se o pico normalizado
+     * estiver bem acima do ruido. Usa spread normalizado E raw spread
+     * para ser robusto a defaults com range largo. */
+    if (norm_spread >= LINE_MIN_NORM_SPREAD) {
+        float margin = norm_spread * 0.35f;
+        if (margin < LINE_NORM_MARGIN_MIN) {
+            margin = LINE_NORM_MARGIN_MIN;
+        }
+
+        for (uint8_t i = 0U; i < LINE_SENSOR_COUNT; i++) {
+            float threshold = (i == 2U) ? LINE_CENTER_ACTIVE_THRESHOLD : LINE_SIDE_ACTIVE_THRESHOLD;
+
+            if (normalized[i] >= threshold && normalized[i] >= (norm_mean + margin)) {
+                count++;
+            }
+        }
+    }
+
+    /* Fallback: nenhum sensor cruzou o threshold absoluto, mas ha linha.
+     * Aceita o pico como 1 sensor ativo quando ha spread normalizado
+     * significativo OU spread raw significativo (caso o normalizado
+     * esteja apertado por causa de defaults com range largo). */
+    if (count == 0U) {
+        uint8_t peak = 0U;
+        for (uint8_t i = 1U; i < LINE_SENSOR_COUNT; i++) {
+            if (normalized[i] > normalized[peak]) {
+                peak = i;
+            }
+        }
+        uint16_t raw_spread = LineSensor_GetRawSpread(values);
+        if (normalized[peak] > 0.15f &&
+            (norm_spread >= 0.10f || raw_spread >= LINE_OFFSET_MIN_SPREAD)) {
+            count = 1U;
         }
     }
 
@@ -608,13 +696,20 @@ static uint8_t LineSensor_CountNormalizedActive(const uint16_t values[LINE_SENSO
 LineSensor_State LineSensor_GetState(uint16_t values[LINE_SENSOR_COUNT])
 {
     if (s_calib_valid != 0U) {
+        uint16_t spread = LineSensor_GetRawSpread(values);
         uint8_t active = LineSensor_CountNormalizedActive(values);
 
         if (active == 0U) {
-            return LINE_LOST;
+            /* Sem nenhum sensor "forte" pelo threshold, mas pode haver
+             * linha com baixo contraste. So considera LOST se nem o
+             * spread bruto indicar variacao. */
+            if (spread < LINE_MIN_RAW_SPREAD) {
+                return LINE_LOST;
+            }
+            return LINE_ON_TRACK_LOW_CONTRAST;
         }
 
-        if (active >= 4U) {
+        if (active >= 4U && spread > 55U) {
             return LINE_CROSSING;
         }
 

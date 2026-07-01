@@ -15,6 +15,7 @@ typedef enum {
 
 typedef enum {
     LINE_ON_TRACK,
+    LINE_ON_TRACK_LOW_CONTRAST,
     LINE_CROSSING,
     LINE_LOST,
 } LineSensor_State;

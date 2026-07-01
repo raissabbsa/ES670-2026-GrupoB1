@@ -15,13 +15,13 @@ extern osMessageQueueId_t queueMotorCmdHandle;
 extern UART_HandleTypeDef hlpuart1;
 
 AppConfig_t app_config = {
-    .line_Kp = 0.40f,
+    .line_Kp = 0.35f,
     .line_Ki = 0.0f,
-    .line_Kd = 0.0f,
+    .line_Kd = 0.04f,
     .speed_Kp = 1.0f,
     .speed_Ki = 0.5f,
     .speed_Kd = 0.0f,
-    .base_speed = 0.42f,
+    .base_speed = 0.25f,
     .sensor_threshold = 0,
     .max_time_ms = 90000,
 };
@@ -30,9 +30,11 @@ volatile LineFollower_State follower_state = STATE_IDLE;
 volatile MotorCmd_t g_motor_cmd = {0.0f, 0.0f};
 
 #define LINE_CORRECTION_MAX      0.18f
-#define LINE_CALIBRATION_MS      650U
-#define LINE_LOST_STOP_COUNT     200U
-#define LINE_LOST_DEBOUNCE       4U
+#define LINE_CALIBRATION_MS      950U
+#define LINE_CALIBRATION_SWEEP_MS 350U
+#define LINE_CALIB_SWEEP_POWER    0.18f
+#define LINE_LOST_STOP_COUNT     100U
+#define LINE_LOST_DEBOUNCE       5U
 #define FOLLOW_RAMP_MS           400U
 #define LINE_LOST_SPREAD_MIN     8U
 #define DEBUG_TX_INTERVAL_MS     500U
@@ -45,10 +47,11 @@ volatile MotorCmd_t g_motor_cmd = {0.0f, 0.0f};
 #define FOLLOW_MIN_SPEED         0.32f
 #define FOLLOW_BOOST_MS          800U
 #define FOLLOW_BOOST_SPEED       0.50f
-#define LINE_CURVE_SLOWDOWN      0.40f
+#define LINE_CURVE_SLOWDOWN      0.12f
 #define LINE_ERROR_FULL_SCALE    0.25f
-#define LINE_SEARCH_SLOW         0.28f
-#define LINE_SEARCH_FAST         0.42f
+#define LINE_CORRECTION_MAX_STRAIGHT 0.18f
+#define LINE_CORRECTION_MAX_CURVE   0.30f
+#define LINE_CORRECTION_SWITCH_ERR  0.15f
 #define ALIGN_SPIN_POWER         0.35f
 #define ALIGN_PIVOT_POWER        0.22f
 #define ALIGN_LINE_SPREAD_MIN    25U
@@ -212,7 +215,7 @@ void App_LineCtrlTask(void *argument)
     App_DebugUartSend("Enter=inicia (alinha sozinho)\r\n");
 
     PID_Init(&s_line_pid, app_config.line_Kp, app_config.line_Ki,
-             app_config.line_Kd, 0.02f, -LINE_CORRECTION_MAX, LINE_CORRECTION_MAX);
+             app_config.line_Kd, 0.02f, -LINE_CORRECTION_MAX_CURVE, LINE_CORRECTION_MAX_CURVE);
 
     uint16_t sensor_values[LINE_SENSOR_COUNT];
     MotorCmd_t cmd;
@@ -239,6 +242,7 @@ void App_LineCtrlTask(void *argument)
     float filtered_line_error = 0.0f;
     uint32_t crossing_start_tick = 0;
     uint32_t ultrasonic_cycle = 0;
+    uint8_t obstacle_streak = 0;
     uint8_t line_lost_streak = 0;
 
     TickType_t last_wake = xTaskGetTickCount();
@@ -298,7 +302,7 @@ void App_LineCtrlTask(void *argument)
             started = 0;
             last_follow_tx = 0;
             HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
-            App_DebugUartSend("=== CALIBRANDO (0.6s) ===\r\n");
+            App_DebugUartSend("=== CALIBRANDO (0.95s) ===\r\n");
         }
 
         if (follower_state == STATE_FOLLOWING &&
@@ -381,7 +385,9 @@ void App_LineCtrlTask(void *argument)
                     abs_corr = -abs_corr;
                 }
 
-                LineSensor_UpdateCalibration(sensor_values);
+                /* Calibracao NAO atualiza min/max durante o alinhamento.
+                 * O pivot gera leituras fora da fita que poluem o range.
+                 * A calibracao real acontece em STATE_CALIBRATING. */
 
                 float pivot = line_err * 1.2f;
                 if (pivot > ALIGN_PIVOT_POWER) {
@@ -445,8 +451,15 @@ void App_LineCtrlTask(void *argument)
                 App_AccumulateCenter(cen, &center_sum, &center_count);
             }
 
-            cmd.vel_left = 0.0f;
-            cmd.vel_right = 0.0f;
+            /* Fase 1 (0..LINE_CALIBRATION_SWEEP_MS): varre linha/branco girando devagar.
+             * Fase 2 (apos): parado sobre a fita para estabilizar o centro. */
+            if (elapsed_ms < LINE_CALIBRATION_SWEEP_MS) {
+                cmd.vel_left = LINE_CALIB_SWEEP_POWER;
+                cmd.vel_right = -LINE_CALIB_SWEEP_POWER;
+            } else {
+                cmd.vel_left = 0.0f;
+                cmd.vel_right = 0.0f;
+            }
             App_ApplyMotorCmd(&cmd);
 
             if (elapsed_ms >= LINE_CALIBRATION_MS) {
@@ -578,11 +591,15 @@ void App_LineCtrlTask(void *argument)
             uint16_t dist = Ultrasonic_ReadDistance();
             Telemetry_SetObstacle(dist);
             if (dist < ULTRASONIC_OBSTACLE_CM) {
-                HAL_GPIO_WritePin(Buzzer_PWM_GPIO_Port, Buzzer_PWM_Pin, GPIO_PIN_SET);
-                follower_state = STATE_STOPPING;
-                App_DebugUartSend("!!! OBSTACULO !!!\r\n");
-                continue;
+                if (obstacle_streak < UINT8_MAX) obstacle_streak++;
+                if (obstacle_streak >= ULTRASONIC_OBSTACLE_DEBOUNCE) {
+                    HAL_GPIO_WritePin(Buzzer_PWM_GPIO_Port, Buzzer_PWM_Pin, GPIO_PIN_SET);
+                    follower_state = STATE_STOPPING;
+                    App_DebugUartSend("!!! OBSTACULO !!!\r\n");
+                    continue;
+                }
             } else {
+                obstacle_streak = 0U;
                 HAL_GPIO_WritePin(Buzzer_PWM_GPIO_Port, Buzzer_PWM_Pin, GPIO_PIN_RESET);
             }
         }
@@ -602,7 +619,7 @@ void App_LineCtrlTask(void *argument)
         uint16_t spread = LineSensor_GetRawSpread(sensor_values);
         float raw_error = LineSensor_GetInterpolatedValue(sensor_values);
 
-        if (line_state == LINE_ON_TRACK) {
+        if (line_state == LINE_ON_TRACK || line_state == LINE_ON_TRACK_LOW_CONTRAST) {
             line_lost_streak = 0U;
             lost_counter = 0;
 
@@ -620,6 +637,24 @@ void App_LineCtrlTask(void *argument)
             if (follow_elapsed < FOLLOW_BOOST_MS) {
                 base = FOLLOW_BOOST_SPEED;
             }
+
+            float abs_err = filtered_line_error;
+            if (abs_err < 0.0f) {
+                abs_err = -abs_err;
+            }
+
+            /* Velocidade adaptativa + correcao maxima adaptativa:
+             * Em reta (|err| < 0.15): base=SPD, max_corr=0.18 (estavel).
+             * Em curva (|err| >= 0.15): base=0.18, max_corr=0.30 (permite pivot).
+             * Isso resolve o dilema "KP alto oscila em reta / KP baixo nao faz curva". */
+            if (abs_err >= LINE_CORRECTION_SWITCH_ERR && base > LINE_CURVE_SLOWDOWN) {
+                base = LINE_CURVE_SLOWDOWN;
+            }
+            float max_corr = (abs_err >= LINE_CORRECTION_SWITCH_ERR)
+                             ? LINE_CORRECTION_MAX_CURVE
+                             : LINE_CORRECTION_MAX_STRAIGHT;
+            if (correction > max_corr) correction = max_corr;
+            if (correction < -max_corr) correction = -max_corr;
 
             cmd.vel_left = base - correction;
             cmd.vel_right = base + correction;
@@ -648,25 +683,31 @@ void App_LineCtrlTask(void *argument)
 
             App_BoostFollowWheels(&cmd);
         } else {
-            /* === LINHA PERDIDA: busca em arco (duas rodas) === */
+            /* === LINHA PERDIDA: dead reckoning (estilo ES070) ===
+             * Sem pivot, sem arco de busca. Continua com o ultimo erro
+             * filtrado ate LINE_LOST_STOP_COUNT ciclos (2s), depois para. */
+            line_lost_streak++;
             lost_counter++;
+
             if (lost_counter > LINE_LOST_STOP_COUNT) {
                 follower_state = STATE_STOPPING;
                 continue;
             }
 
-            if (last_valid_error > 0.02f) {
-                cmd.vel_left = LINE_SEARCH_SLOW;
-                cmd.vel_right = LINE_SEARCH_FAST;
-            } else if (last_valid_error < -0.02f) {
-                cmd.vel_left = LINE_SEARCH_FAST;
-                cmd.vel_right = LINE_SEARCH_SLOW;
-            } else {
-                cmd.vel_left = LINE_SEARCH_SLOW;
-                cmd.vel_right = LINE_SEARCH_FAST;
-            }
+            filtered_line_error = last_valid_error;
 
-            PID_Reset(&s_line_pid);
+            float correction = PID_Compute(&s_line_pid, 0.0f, filtered_line_error);
+            float base = app_config.base_speed;
+
+            cmd.vel_left = base - correction;
+            cmd.vel_right = base + correction;
+
+            if (cmd.vel_left < 0.0f) cmd.vel_left = 0.0f;
+            if (cmd.vel_right < 0.0f) cmd.vel_right = 0.0f;
+            if (cmd.vel_left > FOLLOW_MAX_SPEED) cmd.vel_left = FOLLOW_MAX_SPEED;
+            if (cmd.vel_right > FOLLOW_MAX_SPEED) cmd.vel_right = FOLLOW_MAX_SPEED;
+
+            App_BoostFollowWheels(&cmd);
         }
 
         App_ApplyMotorCmd(&cmd);

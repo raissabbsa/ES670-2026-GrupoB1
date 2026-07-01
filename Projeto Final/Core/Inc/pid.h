@@ -8,6 +8,7 @@ typedef struct {
     float dt;
     float integral;
     float prev_error;
+    float prev_derivative;
     float output_min;
     float output_max;
 } PID_Controller;

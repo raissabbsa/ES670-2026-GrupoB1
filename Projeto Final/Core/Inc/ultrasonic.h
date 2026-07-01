@@ -3,7 +3,8 @@
 
 #include <stdint.h>
 
-#define ULTRASONIC_OBSTACLE_CM   15U
+#define ULTRASONIC_OBSTACLE_CM   10U
+#define ULTRASONIC_OBSTACLE_DEBOUNCE  3U
 #define ULTRASONIC_MAX_CM        400U
 
 void Ultrasonic_Init(void);

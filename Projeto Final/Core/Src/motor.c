@@ -3,9 +3,12 @@
 
 extern TIM_HandleTypeDef htim1;
 
-/* Compensa motores diferentes: power * scale -> duty cycle PWM */
-static float s_left_scale = 1.0f;
-static float s_right_scale = 1.0f;
+/* Compensa motores diferentes: power * scale -> duty cycle PWM.
+ * Defaults medidos em bancada para o robo do grupo B1: motor direito
+ * mais forte, precisa de escala menor; esquerdo precisa de escala maior.
+ * Ajustaveis via Bluetooth ($SET,LSCL / $SET,RSCL). */
+static float s_left_scale = 0.95f;
+static float s_right_scale = 1.20f;
 
 static float Motor_ClampScale(float scale)
 {
