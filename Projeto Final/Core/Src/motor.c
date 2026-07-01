@@ -3,6 +3,41 @@
 
 extern TIM_HandleTypeDef htim1;
 
+/* Compensa motores diferentes: power * scale -> duty cycle PWM */
+static float s_left_scale = 1.0f;
+static float s_right_scale = 1.0f;
+
+static float Motor_ClampScale(float scale)
+{
+    if (scale < 0.5f) {
+        return 0.5f;
+    }
+    if (scale > 1.5f) {
+        return 1.5f;
+    }
+    return scale;
+}
+
+void Motor_SetLeftScale(float scale)
+{
+    s_left_scale = Motor_ClampScale(scale);
+}
+
+void Motor_SetRightScale(float scale)
+{
+    s_right_scale = Motor_ClampScale(scale);
+}
+
+void Motor_GetScales(float *left, float *right)
+{
+    if (left != NULL) {
+        *left = s_left_scale;
+    }
+    if (right != NULL) {
+        *right = s_right_scale;
+    }
+}
+
 /*
  * Mapeamento igual ao vMotorEncoderInitMotors do exemplo do professor:
  *   Motor direito: Motor_Dir_IN3=PB12, Motor_Dir_IN4=PB9, Motor_Dir_PWM=TIM1_CH2 (PC1)
@@ -44,7 +79,10 @@ static void Motor_ApplyRight(float power)
             power = 1.0f;
         }
         Motor_SetRightDirection(1U);
-        compare = (uint32_t)(power * (float)MOTOR_PWM_MAX);
+        compare = (uint32_t)(power * s_right_scale * (float)MOTOR_PWM_MAX);
+        if (compare > MOTOR_PWM_MAX) {
+            compare = MOTOR_PWM_MAX;
+        }
     }
 
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, compare);
@@ -63,7 +101,10 @@ static void Motor_ApplyLeft(float power)
             power = 1.0f;
         }
         Motor_SetLeftDirection(1U);
-        compare = (uint32_t)(power * (float)MOTOR_PWM_MAX);
+        compare = (uint32_t)(power * s_left_scale * (float)MOTOR_PWM_MAX);
+        if (compare > MOTOR_PWM_MAX) {
+            compare = MOTOR_PWM_MAX;
+        }
     }
 
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, compare);

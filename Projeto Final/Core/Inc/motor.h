@@ -17,4 +17,9 @@ void Motor_SetSpeed(int16_t left, int16_t right);
 void Motor_Stop(void);
 void Motor_Brake(void);
 
+/* Escala de duty cycle por roda (1.0 = sem compensacao) */
+void Motor_SetLeftScale(float scale);
+void Motor_SetRightScale(float scale);
+void Motor_GetScales(float *left, float *right);
+
 #endif /* MOTOR_H */
