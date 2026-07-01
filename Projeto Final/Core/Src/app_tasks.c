@@ -94,24 +94,6 @@ static void App_BoostFollowWheels(MotorCmd_t *cmd)
     }
 }
 
-static uint8_t App_GetLineSensorIndex(const uint16_t values[LINE_SENSOR_COUNT])
-{
-    uint8_t idx = 0U;
-    LinePolarity pol = LineSensor_GetPolarity();
-
-    for (uint8_t i = 1U; i < LINE_SENSOR_COUNT; i++) {
-        if (pol == LINE_POLARITY_DARK) {
-            if (values[i] < values[idx]) {
-                idx = i;
-            }
-        } else if (values[i] > values[idx]) {
-            idx = i;
-        }
-    }
-
-    return idx;
-}
-
 static uint8_t App_LineVisibleQuick(const uint16_t values[LINE_SENSOR_COUNT])
 {
     if (LineSensor_GetRawSpread(values) < ALIGN_LINE_SPREAD_MIN) {
@@ -243,7 +225,6 @@ void App_LineCtrlTask(void *argument)
     uint32_t last_led_toggle = 0;
     uint32_t last_debug_tx = 0;
     uint32_t last_follow_tx = 0;
-    uint8_t calib_polarity_done = 0;
     float center_sum = 0.0f;
     uint32_t center_count = 0U;
     float last_good_center = 2.6f;
@@ -296,7 +277,6 @@ void App_LineCtrlTask(void *argument)
             if (App_LineVisibleQuick(sensor_values)) {
                 LineSensor_SetPolarity(
                     LineSensor_DetectPolarityFromLayout(sensor_values));
-                calib_polarity_done = 1;
                 align_phase = ALIGN_PHASE_CREEP;
                 align_creep_start = xTaskGetTickCount();
                 align_ok_streak = 0U;
@@ -309,13 +289,12 @@ void App_LineCtrlTask(void *argument)
 
         if (follower_state == STATE_CALIBRATING && prev_state != STATE_CALIBRATING) {
             calib_start_tick = xTaskGetTickCount();
-            calib_polarity_done = 0;
             center_sum = 0.0f;
             center_count = 0U;
+            LineSensor_ResetCalibration();
             LineSensor_ReadAll(sensor_values);
             LineSensor_SetPolarity(
                 LineSensor_DetectPolarityFromLayout(sensor_values));
-            calib_polarity_done = 1;
             started = 0;
             last_follow_tx = 0;
             HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
@@ -370,7 +349,6 @@ void App_LineCtrlTask(void *argument)
                     align_detect_streak = 0U;
                     LineSensor_SetPolarity(
                         LineSensor_DetectPolarityFromLayout(sensor_values));
-                    calib_polarity_done = 1;
                     App_DebugUartSend("Fita vista - centralizando\r\n");
                 } else {
                     int32_t spin_count = Encoder_GetCountRight() + Encoder_GetCountLeft();
@@ -443,7 +421,6 @@ void App_LineCtrlTask(void *argument)
             if (elapsed_ms >= ALIGN_TOTAL_MAX_MS) {
                 if (align_phase == ALIGN_PHASE_SPIN) {
                     LineSensor_SetPolarity(LineSensor_DetectPolarityFromLayout(sensor_values));
-                    calib_polarity_done = 1;
                 }
                 cmd.vel_left = 0.0f;
                 cmd.vel_right = 0.0f;
@@ -459,6 +436,7 @@ void App_LineCtrlTask(void *argument)
             uint32_t elapsed_ms = (xTaskGetTickCount() - calib_start_tick) * portTICK_PERIOD_MS;
 
             LineSensor_ReadAll(sensor_values);
+            LineSensor_UpdateCalibration(sensor_values);
 
             uint16_t spread = LineSensor_GetRawSpread(sensor_values);
 
@@ -472,6 +450,9 @@ void App_LineCtrlTask(void *argument)
             App_ApplyMotorCmd(&cmd);
 
             if (elapsed_ms >= LINE_CALIBRATION_MS) {
+                LineSensor_SetPolarity(LineSensor_DetectPolarity());
+                LineSensor_FinalizeCalibration();
+
                 if (center_count >= LINE_CENTER_MIN_SAMPLES) {
                     float candidate = center_sum / (float)center_count;
                     float center = App_ValidateCenter(candidate, last_good_center);
@@ -498,18 +479,28 @@ void App_LineCtrlTask(void *argument)
             uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
             if (now - last_debug_tx >= DEBUG_TX_INTERVAL_MS) {
                 last_debug_tx = now;
-                char buf[192];
+                char buf[256];
+                float norm[LINE_SENSOR_COUNT];
+                uint16_t min2 = 0U;
+                uint16_t max2 = 0U;
                 float line_err = LineSensor_GetInterpolatedValue(sensor_values);
+                LineSensor_GetNormalizedAll(sensor_values, norm);
+                LineSensor_GetCalibrationBounds(2U, &min2, &max2);
                 int len = snprintf(buf, sizeof(buf),
-                    "IR[%3u %3u %3u %3u %3u] spr=%u err=%d cen=%d ctr=%d idx=%u act=%u\r\n",
+                    "IR[%3u %3u %3u %3u %3u] N[%02d %02d %02d %02d %02d] spr=%u err=%d cen=%d ctr=%d act=%u cal=%u m2=%u/%u\r\n",
                     sensor_values[0], sensor_values[1], sensor_values[2],
                     sensor_values[3], sensor_values[4],
+                    (int)(norm[0] * 99.0f), (int)(norm[1] * 99.0f),
+                    (int)(norm[2] * 99.0f), (int)(norm[3] * 99.0f),
+                    (int)(norm[4] * 99.0f),
                     (unsigned)LineSensor_GetRawSpread(sensor_values),
                     (int)(line_err * 100.0f),
                     (int)(LineSensor_GetCentroidIndex(sensor_values) * 10.0f),
                     (int)(LineSensor_GetCenterTarget() * 10.0f),
-                    (unsigned)App_GetLineSensorIndex(sensor_values),
-                    (unsigned)LineSensor_GetActiveCount(sensor_values));
+                    (unsigned)LineSensor_GetActiveCount(sensor_values),
+                    (unsigned)LineSensor_IsCalibrationValid(),
+                    (unsigned)min2,
+                    (unsigned)max2);
                 if (len > 0 && len < (int)sizeof(buf)) {
                     App_DebugUartSend(buf);
                 }
@@ -611,7 +602,7 @@ void App_LineCtrlTask(void *argument)
         uint16_t spread = LineSensor_GetRawSpread(sensor_values);
         float raw_error = LineSensor_GetInterpolatedValue(sensor_values);
 
-        if (spread >= LINE_LOST_SPREAD_MIN) {
+        if (line_state == LINE_ON_TRACK) {
             line_lost_streak = 0U;
             lost_counter = 0;
 

@@ -1,5 +1,6 @@
 #include "line_sensor.h"
 #include "main.h"
+#include <stddef.h>
 
 extern ADC_HandleTypeDef hadc2;
 extern ADC_HandleTypeDef hadc3;
@@ -22,17 +23,23 @@ extern ADC_HandleTypeDef hadc5;
 #define LINE_ERROR_CLAMP     0.35f
 #define LINE_OUTLIER_DELTA   120U
 #define LINE_ADC_MAX_VALID   2000U
+#define LINE_CALIB_DEFAULT_MIN  120U
+#define LINE_CALIB_DEFAULT_MAX  900U
 
 static uint16_t s_min[LINE_SENSOR_COUNT];
 static uint16_t s_max[LINE_SENSOR_COUNT];
-static float s_weights[LINE_SENSOR_COUNT] = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f};
+static uint16_t s_last_valid_min[LINE_SENSOR_COUNT];
+static uint16_t s_last_valid_max[LINE_SENSOR_COUNT];
 
 static uint8_t LineSensor_CountRawActive(const uint16_t values[LINE_SENSOR_COUNT]);
+static uint8_t LineSensor_CountNormalizedActive(const uint16_t values[LINE_SENSOR_COUNT]);
 
 static LinePolarity s_polarity = LINE_POLARITY_LIGHT;
 static float s_center_target = 2.6f;
 static uint32_t s_calib_sum_center = 0;
 static uint32_t s_calib_count = 0;
+static uint8_t s_calib_valid = 0U;
+static uint8_t s_calib_collecting = 0U;
 
 #define LINE_ADC_SAMPLES 4U
 
@@ -83,6 +90,18 @@ static float LineSensor_Normalize(uint8_t index, uint16_t raw)
     return value;
 }
 
+static void LineSensor_LoadDefaultCalibration(void)
+{
+    for (uint8_t i = 0U; i < LINE_SENSOR_COUNT; i++) {
+        s_min[i] = LINE_CALIB_DEFAULT_MIN;
+        s_max[i] = LINE_CALIB_DEFAULT_MAX;
+        s_last_valid_min[i] = s_min[i];
+        s_last_valid_max[i] = s_max[i];
+    }
+
+    s_calib_valid = 1U;
+}
+
 uint16_t LineSensor_GetRawSpread(const uint16_t values[LINE_SENSOR_COUNT])
 {
     uint16_t mn = values[0];
@@ -98,77 +117,6 @@ uint16_t LineSensor_GetRawSpread(const uint16_t values[LINE_SENSOR_COUNT])
     }
 
     return (uint16_t)(mx - mn);
-}
-
-static float LineSensor_GetDifferentialValue(const uint16_t values[LINE_SENSOR_COUNT])
-{
-    float mean = 0.0f;
-    uint16_t spread = LineSensor_GetRawSpread(values);
-
-    for (uint8_t i = 0; i < LINE_SENSOR_COUNT; i++) {
-        mean += (float)values[i];
-    }
-    mean /= (float)LINE_SENSOR_COUNT;
-
-    float neg_max = 0.0f;
-    float pos_max = 0.0f;
-    float value = 0.0f;
-
-    for (uint8_t i = 0; i < LINE_SENSOR_COUNT; i++) {
-        float diff;
-
-        if (s_polarity == LINE_POLARITY_DARK) {
-            diff = mean - (float)values[i];
-        } else {
-            diff = (float)values[i] - mean;
-        }
-
-        if (s_weights[i] > 0.0f) {
-            pos_max += s_weights[i];
-        } else {
-            neg_max -= s_weights[i];
-        }
-
-        value += diff * s_weights[i];
-    }
-
-    if (spread < LINE_MIN_RAW_SPREAD) {
-        return 0.0f;
-    }
-
-    float denom = (value > 0.0f) ? (pos_max * (float)spread)
-                                 : (neg_max * (float)spread);
-    if (denom < 1.0f) {
-        return 0.0f;
-    }
-
-    float error = value / denom;
-    if (error > LINE_ERROR_CLAMP) {
-        error = LINE_ERROR_CLAMP;
-    }
-    if (error < -LINE_ERROR_CLAMP) {
-        error = -LINE_ERROR_CLAMP;
-    }
-
-    return error;
-}
-
-static float LineSensor_GetThickLineError(const uint16_t values[LINE_SENSOR_COUNT])
-{
-    uint8_t line_idx = 0U;
-
-    for (uint8_t i = 1U; i < LINE_SENSOR_COUNT; i++) {
-        if (s_polarity == LINE_POLARITY_DARK) {
-            if (values[i] < values[line_idx]) {
-                line_idx = i;
-            }
-        } else if (values[i] > values[line_idx]) {
-            line_idx = i;
-        }
-    }
-
-    float pos = ((float)line_idx - 2.0f) / 2.0f;
-    return pos * LINE_ERROR_CLAMP;
 }
 
 static uint8_t LineSensor_IsOnThickLine(const uint16_t values[LINE_SENSOR_COUNT])
@@ -279,9 +227,10 @@ void LineSensor_Init(void)
     HAL_ADCEx_Calibration_Start(&hadc4, ADC_SINGLE_ENDED);
     HAL_ADCEx_Calibration_Start(&hadc5, ADC_SINGLE_ENDED);
 
-    LineSensor_ResetCalibration();
+    LineSensor_LoadDefaultCalibration();
     s_polarity = LINE_POLARITY_LIGHT;
     s_center_target = 2.6f;
+    s_calib_collecting = 0U;
 }
 
 void LineSensor_ResetCalibration(void)
@@ -292,10 +241,16 @@ void LineSensor_ResetCalibration(void)
     }
     s_calib_sum_center = 0;
     s_calib_count = 0;
+    s_calib_valid = 0U;
+    s_calib_collecting = 1U;
 }
 
 void LineSensor_UpdateCalibration(const uint16_t values[LINE_SENSOR_COUNT])
 {
+    if (s_calib_collecting == 0U) {
+        return;
+    }
+
     for (uint8_t i = 0; i < LINE_SENSOR_COUNT; i++) {
         if (values[i] > s_max[i]) {
             s_max[i] = values[i];
@@ -307,6 +262,35 @@ void LineSensor_UpdateCalibration(const uint16_t values[LINE_SENSOR_COUNT])
 
     s_calib_sum_center += values[2];
     s_calib_count++;
+}
+
+void LineSensor_FinalizeCalibration(void)
+{
+    uint8_t valid_count = 0U;
+
+    for (uint8_t i = 0U; i < LINE_SENSOR_COUNT; i++) {
+        uint16_t range = (s_max[i] > s_min[i]) ? (uint16_t)(s_max[i] - s_min[i]) : 0U;
+
+        if (range >= LINE_MIN_CALIB_RANGE && s_max[i] <= LINE_ADC_MAX_VALID) {
+            s_last_valid_min[i] = s_min[i];
+            s_last_valid_max[i] = s_max[i];
+            valid_count++;
+        } else {
+            s_min[i] = s_last_valid_min[i];
+            s_max[i] = s_last_valid_max[i];
+        }
+    }
+
+    s_calib_valid = (valid_count >= 3U) ? 1U : 0U;
+    if (s_calib_valid == 0U) {
+        for (uint8_t i = 0U; i < LINE_SENSOR_COUNT; i++) {
+            s_min[i] = s_last_valid_min[i];
+            s_max[i] = s_last_valid_max[i];
+        }
+        s_calib_valid = 1U;
+    }
+
+    s_calib_collecting = 0U;
 }
 
 void LineSensor_ReadAll(uint16_t values[LINE_SENSOR_COUNT])
@@ -329,8 +313,62 @@ float LineSensor_GetSensorValue(uint8_t index, uint16_t values[LINE_SENSOR_COUNT
     return LineSensor_Normalize(index, values[index]);
 }
 
+void LineSensor_GetNormalizedAll(const uint16_t values[LINE_SENSOR_COUNT],
+                                 float normalized[LINE_SENSOR_COUNT])
+{
+    if (normalized == NULL) {
+        return;
+    }
+
+    for (uint8_t i = 0U; i < LINE_SENSOR_COUNT; i++) {
+        normalized[i] = LineSensor_Normalize(i, values[i]);
+    }
+}
+
+uint8_t LineSensor_IsCalibrationValid(void)
+{
+    return s_calib_valid;
+}
+
+void LineSensor_GetCalibrationBounds(uint8_t index, uint16_t *min_value, uint16_t *max_value)
+{
+    if (index >= LINE_SENSOR_COUNT) {
+        return;
+    }
+
+    if (min_value != NULL) {
+        *min_value = s_min[index];
+    }
+    if (max_value != NULL) {
+        *max_value = s_max[index];
+    }
+}
+
 float LineSensor_GetCentroidIndex(const uint16_t values[LINE_SENSOR_COUNT])
 {
+    if (s_calib_valid != 0U) {
+        float normalized[LINE_SENSOR_COUNT];
+        float sum_w = 0.0f;
+        float sum_pos = 0.0f;
+
+        LineSensor_GetNormalizedAll(values, normalized);
+        for (uint8_t i = 0U; i < LINE_SENSOR_COUNT; i++) {
+            float threshold = (i == 2U) ? LINE_CENTER_ACTIVE_THRESHOLD : LINE_SIDE_ACTIVE_THRESHOLD;
+            float w = normalized[i];
+
+            if (w < threshold) {
+                continue;
+            }
+
+            sum_w += w;
+            sum_pos += (float)i * w;
+        }
+
+        if (sum_w > 0.01f) {
+            return sum_pos / sum_w;
+        }
+    }
+
     uint16_t spread = LineSensor_GetRawSpread(values);
     LinePolarity pol = s_polarity;
 
@@ -467,6 +505,23 @@ static uint8_t LineSensor_UseDifferentialError(const uint16_t values[LINE_SENSOR
 
 float LineSensor_GetInterpolatedValue(uint16_t values[LINE_SENSOR_COUNT])
 {
+    if (s_calib_valid != 0U) {
+        uint8_t active = LineSensor_CountNormalizedActive(values);
+
+        if (active == 0U) {
+            return 0.0f;
+        }
+
+        float centroid = LineSensor_GetCentroidIndex(values);
+        float error = (centroid - s_center_target) / 2.0f;
+
+        if (error > -0.08f && error < 0.08f) {
+            return 0.0f;
+        }
+
+        return LineSensor_ClampError(error);
+    }
+
     uint16_t spread = LineSensor_GetRawSpread(values);
 
     if (spread < LINE_MIN_RAW_SPREAD && !LineSensor_IsOnThickLine(values)) {
@@ -528,8 +583,44 @@ static uint8_t LineSensor_CountRawActive(const uint16_t values[LINE_SENSOR_COUNT
     return count;
 }
 
+static uint8_t LineSensor_CountNormalizedActive(const uint16_t values[LINE_SENSOR_COUNT])
+{
+    float normalized[LINE_SENSOR_COUNT];
+    uint8_t count = 0U;
+
+    if (s_calib_valid == 0U) {
+        return 0U;
+    }
+
+    LineSensor_GetNormalizedAll(values, normalized);
+
+    for (uint8_t i = 0U; i < LINE_SENSOR_COUNT; i++) {
+        float threshold = (i == 2U) ? LINE_CENTER_ACTIVE_THRESHOLD : LINE_SIDE_ACTIVE_THRESHOLD;
+
+        if (normalized[i] >= threshold) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
 LineSensor_State LineSensor_GetState(uint16_t values[LINE_SENSOR_COUNT])
 {
+    if (s_calib_valid != 0U) {
+        uint8_t active = LineSensor_CountNormalizedActive(values);
+
+        if (active == 0U) {
+            return LINE_LOST;
+        }
+
+        if (active >= 4U) {
+            return LINE_CROSSING;
+        }
+
+        return LINE_ON_TRACK;
+    }
+
     uint16_t spread = LineSensor_GetRawSpread(values);
     uint8_t active = LineSensor_GetActiveCount(values);
 
@@ -550,6 +641,10 @@ LineSensor_State LineSensor_GetState(uint16_t values[LINE_SENSOR_COUNT])
 
 uint8_t LineSensor_GetActiveCount(uint16_t values[LINE_SENSOR_COUNT])
 {
+    if (s_calib_valid != 0U) {
+        return LineSensor_CountNormalizedActive(values);
+    }
+
     uint8_t count = LineSensor_CountRawActive(values);
 
     if (count > 0U) {
