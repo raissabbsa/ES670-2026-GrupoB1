@@ -1265,6 +1265,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     static uint32_t last_enter_tick = 0;
     static uint32_t last_baixo_tick = 0;
+    static uint32_t last_esq_tick = 0;
+    static uint32_t last_dir_tick = 0;
 
     if (GPIO_Pin == BT_Enter_Pin) {
         if (HAL_GPIO_ReadPin(BT_Enter_GPIO_Port, BT_Enter_Pin) != GPIO_PIN_SET) {
@@ -1276,6 +1278,37 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
             return;
         }
         last_enter_tick = now;
+
+        /* Se estiver em calibracao de sensores, Enter finaliza
+         * a captura (util para quem nao tem BT e nao quer esperar
+         * o timeout de 30s). */
+        if (follower_state == STATE_CALIB_SENSORES) {
+            LineSensor_SetPolarity(LineSensor_DetectPolarity());
+            LineSensor_FinalizeCalibration();
+            HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
+            follower_state = STATE_IDLE;
+            /* Log do resultado da calibracao */
+            LinePolarity pol = LineSensor_GetPolarity();
+            const char *pol_str = (pol == LINE_POLARITY_DARK) ? "DARK" : "LIGHT";
+            uint16_t mn[LINE_SENSOR_COUNT];
+            uint16_t mx[LINE_SENSOR_COUNT];
+            for (uint8_t k = 0U; k < LINE_SENSOR_COUNT; k++) {
+                LineSensor_GetCalibrationBounds(k, &mn[k], &mx[k]);
+            }
+            char log_buf[96];
+            int n = snprintf(log_buf, sizeof(log_buf),
+                "Calib S OK (Enter): pol=%s mean=%.0f m=[%u,%u,%u,%u,%u]/[%u,%u,%u,%u,%u]\r\n",
+                pol_str, LineSensor_GetCalibMeanRaw(),
+                (unsigned)mn[0], (unsigned)mn[1], (unsigned)mn[2],
+                (unsigned)mn[3], (unsigned)mn[4],
+                (unsigned)mx[0], (unsigned)mx[1], (unsigned)mx[2],
+                (unsigned)mx[3], (unsigned)mx[4]);
+            if (n > 0 && n < (int)sizeof(log_buf)) {
+                extern UART_HandleTypeDef hlpuart1;
+                HAL_UART_Transmit(&hlpuart1, (uint8_t *)log_buf, (uint16_t)n, 100);
+            }
+            return;
+        }
 
         if (follower_state == STATE_IDLE || follower_state == STATE_STOPPED ||
             follower_state == STATE_DEBUG) {
@@ -1303,6 +1336,45 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         } else {
             follower_state = STATE_DEBUG;
             HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
+        }
+    }
+
+    if (GPIO_Pin == BT_Esq_Pin) {
+        /* Botao ESQUERDO: inicia calibracao passiva de sensores.
+         * Equivalente a $CMD,CALIB,S. Util para quem nao tem BT. */
+        if (HAL_GPIO_ReadPin(BT_Esq_GPIO_Port, BT_Esq_Pin) != GPIO_PIN_SET) {
+            return;
+        }
+
+        uint32_t now = HAL_GetTick();
+        if (now - last_esq_tick < 200) {
+            return;
+        }
+        last_esq_tick = now;
+
+        /* So inicia se estiver em IDLE, STOPPED ou DEBUG */
+        if (follower_state == STATE_IDLE || follower_state == STATE_STOPPED ||
+            follower_state == STATE_DEBUG) {
+            App_StartCalibSensores();
+        }
+    }
+
+    if (GPIO_Pin == BT_Dir_Pin) {
+        /* Botao DIREITO: inicia calibracao ativa de motores.
+         * Equivalente a $CMD,CALIB,M. Util para quem nao tem BT. */
+        if (HAL_GPIO_ReadPin(BT_Dir_GPIO_Port, BT_Dir_Pin) != GPIO_PIN_SET) {
+            return;
+        }
+
+        uint32_t now = HAL_GetTick();
+        if (now - last_dir_tick < 200) {
+            return;
+        }
+        last_dir_tick = now;
+
+        /* So inicia se estiver em IDLE ou STOPPED */
+        if (follower_state == STATE_IDLE || follower_state == STATE_STOPPED) {
+            App_StartCalibMotores();
         }
     }
 

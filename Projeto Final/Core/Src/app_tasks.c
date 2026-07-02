@@ -21,18 +21,19 @@ AppConfig_t app_config = {
     .speed_Kp = 1.0f,
     .speed_Ki = 0.5f,
     .speed_Kd = 0.0f,
-    .base_speed = 0.25f,
+    .base_speed = 0.30f,
     .sensor_threshold = 0,
     .max_time_ms = 90000,
 };
 
 volatile LineFollower_State follower_state = STATE_IDLE;
 volatile MotorCmd_t g_motor_cmd = {0.0f, 0.0f};
+volatile uint32_t g_motor_cycles = 0U;
 
 #define LINE_CORRECTION_MAX      0.18f
-#define LINE_CALIBRATION_MS      950U
-#define LINE_CALIBRATION_SWEEP_MS 350U
-#define LINE_CALIB_SWEEP_POWER    0.18f
+#define LINE_CALIBRATION_MS      1200U
+#define LINE_CALIBRATION_SWEEP_MS 600U
+#define LINE_CALIB_SWEEP_POWER    0.25f
 #define LINE_LOST_STOP_COUNT     100U
 #define LINE_LOST_DEBOUNCE       5U
 #define FOLLOW_RAMP_MS           400U
@@ -62,8 +63,20 @@ volatile MotorCmd_t g_motor_cmd = {0.0f, 0.0f};
 #define ALIGN_CENTER_ERR_MAX     0.08f
 #define ALIGN_SPIN_PULSES_ROT    70
 #define ALIGN_TOTAL_MAX_MS       8000U
-#define CROSSING_STRAIGHT_MS     300U
+#define CROSSING_STRAIGHT_MS     400U
 #define ULTRASONIC_CHECK_CYCLES  5U
+
+/* Calibracao automatica de sensores (passiva) */
+#define CALIB_SENS_TIMEOUT_MS    30000U
+#define CALIB_SENS_BLINK_MS      100U
+
+/* Calibracao automatica de motores (ativa) */
+#define CALIB_MOT_FWD_MS         2000U
+#define CALIB_MOT_REV_MS         1000U
+#define CALIB_MOT_PAUSE_MS       200U
+#define CALIB_MOT_SPEED          0.30f
+#define CALIB_MOT_TOTAL_MS       (CALIB_MOT_FWD_MS + CALIB_MOT_PAUSE_MS + \
+                                  CALIB_MOT_REV_MS + CALIB_MOT_PAUSE_MS)
 
 typedef enum {
     ALIGN_PHASE_SPIN = 0,
@@ -160,6 +173,19 @@ static void App_DebugUartSend(const char *msg)
 static PID_Controller s_line_pid;
 static volatile uint8_t s_line_pid_gains_pending = 0U;
 
+/* Variaveis compartilhadas entre App_StartCalibSensores() (externo) e
+ * App_LineCtrlTask() para a calibracao passiva de sensores. */
+static volatile uint32_t s_calib_sens_start_tick = 0U;
+static volatile uint32_t s_calib_sens_last_blink = 0U;
+static volatile uint8_t s_calib_sens_blink_state = 0U;
+
+/* Variaveis compartilhadas entre App_StartCalibMotores() e
+ * App_LineCtrlTask() para a calibracao ativa de motores. */
+static volatile uint32_t s_calib_mot_start_tick = 0U;
+static volatile uint8_t s_calib_mot_phase = 0U;
+static volatile int32_t s_calib_mot_left_fwd = 0;
+static volatile int32_t s_calib_mot_right_fwd = 0;
+
 void App_SetLinePidGains(float kp, float ki, float kd)
 {
     app_config.line_Kp = kp;
@@ -205,6 +231,35 @@ static void App_ApplyPendingLinePidGains(void)
     s_line_pid_gains_pending = 0U;
 }
 
+/* Inicia calibracao automatica de sensores (passiva).
+ * O usuario move o robo manualmente sobre a pista, e o firmware
+ * captura min/max dos sensores. */
+void App_StartCalibSensores(void)
+{
+    LineSensor_ResetCalibration();
+    s_calib_sens_start_tick = xTaskGetTickCount();
+    s_calib_sens_last_blink = 0U;
+    s_calib_sens_blink_state = 0U;
+    follower_state = STATE_CALIB_SENSORES;
+    App_DebugUartSend("Calib S: capturando (mexa o robo)...\r\n");
+}
+
+/* Inicia calibracao automatica de motores (ativa).
+ * O robo anda sozinho por ~3s e o firmware calcula LSCL/RSCL. */
+void App_StartCalibMotores(void)
+{
+    if (follower_state != STATE_IDLE) {
+        App_DebugUartSend("Calib M: estado nao eh IDLE\r\n");
+        return;
+    }
+    s_calib_mot_start_tick = xTaskGetTickCount();
+    s_calib_mot_phase = 0U;
+    s_calib_mot_left_fwd = 0;
+    s_calib_mot_right_fwd = 0;
+    follower_state = STATE_CALIB_MOTORES;
+    App_DebugUartSend("Calib M: andando (~3s)...\r\n");
+}
+
 void App_LineCtrlTask(void *argument)
 {
     (void)argument;
@@ -241,6 +296,7 @@ void App_LineCtrlTask(void *argument)
     uint8_t align_ok_streak = 0;
     float filtered_line_error = 0.0f;
     uint32_t crossing_start_tick = 0;
+    uint8_t crossing_count = 0;  /* 0=nenhum, 1=primeiro (cruzamento), 2+=chegada */
     uint32_t ultrasonic_cycle = 0;
     uint8_t obstacle_streak = 0;
     uint8_t line_lost_streak = 0;
@@ -256,7 +312,7 @@ void App_LineCtrlTask(void *argument)
             last_debug_tx = 0;
             LineSensor_ReadAll(sensor_values);
             LineSensor_SetPolarity(
-                LineSensor_DetectPolarityFromLayout(sensor_values));
+                LineSensor_DetectPolarity());
             App_DebugUartSend("=== MODO DEBUG SENSORES ===\r\n");
             App_DebugUartSend("Centro na linha: err~0 cen~ctr\r\n");
             App_DebugUartSend("Baixo=sair | Enter=iniciar seguir\r\n");
@@ -279,8 +335,8 @@ void App_LineCtrlTask(void *argument)
 
             LineSensor_ReadAll(sensor_values);
             if (App_LineVisibleQuick(sensor_values)) {
-                LineSensor_SetPolarity(
-                    LineSensor_DetectPolarityFromLayout(sensor_values));
+LineSensor_SetPolarity(
+                LineSensor_DetectPolarity());
                 align_phase = ALIGN_PHASE_CREEP;
                 align_creep_start = xTaskGetTickCount();
                 align_ok_streak = 0U;
@@ -298,11 +354,11 @@ void App_LineCtrlTask(void *argument)
             LineSensor_ResetCalibration();
             LineSensor_ReadAll(sensor_values);
             LineSensor_SetPolarity(
-                LineSensor_DetectPolarityFromLayout(sensor_values));
+                LineSensor_DetectPolarity());
             started = 0;
             last_follow_tx = 0;
             HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
-            App_DebugUartSend("=== CALIBRANDO (0.95s) ===\r\n");
+            App_DebugUartSend("=== CALIBRANDO (1.2s) ===\r\n");
         }
 
         if (follower_state == STATE_FOLLOWING &&
@@ -314,6 +370,7 @@ void App_LineCtrlTask(void *argument)
             last_follow_tx = 0;
             filtered_line_error = 0.0f;
             line_lost_streak = 0;
+            crossing_count = 0;
             PID_Reset(&s_line_pid);
         }
         prev_state = follower_state;
@@ -352,7 +409,7 @@ void App_LineCtrlTask(void *argument)
                     align_ok_streak = 0U;
                     align_detect_streak = 0U;
                     LineSensor_SetPolarity(
-                        LineSensor_DetectPolarityFromLayout(sensor_values));
+                         LineSensor_DetectPolarity());
                     App_DebugUartSend("Fita vista - centralizando\r\n");
                 } else {
                     int32_t spin_count = Encoder_GetCountRight() + Encoder_GetCountLeft();
@@ -426,7 +483,7 @@ void App_LineCtrlTask(void *argument)
 
             if (elapsed_ms >= ALIGN_TOTAL_MAX_MS) {
                 if (align_phase == ALIGN_PHASE_SPIN) {
-                    LineSensor_SetPolarity(LineSensor_DetectPolarityFromLayout(sensor_values));
+                    LineSensor_SetPolarity(LineSensor_DetectPolarity());
                 }
                 cmd.vel_left = 0.0f;
                 cmd.vel_right = 0.0f;
@@ -473,11 +530,177 @@ void App_LineCtrlTask(void *argument)
                     last_good_center = center;
                 }
 
+                /* Log de diagnostico: mostra polaridade, media das leituras
+                 * cruas e min/max finais. Util para saber se calibrou certo. */
+                {
+                    LinePolarity pol = LineSensor_GetPolarity();
+                    const char *pol_str = (pol == LINE_POLARITY_DARK) ? "DARK" : "LIGHT";
+                    uint16_t mn[LINE_SENSOR_COUNT];
+                    uint16_t mx[LINE_SENSOR_COUNT];
+                    for (uint8_t k = 0U; k < LINE_SENSOR_COUNT; k++) {
+                        LineSensor_GetCalibrationBounds(k, &mn[k], &mx[k]);
+                    }
+                    char buf2[96];
+                    int n = snprintf(buf2, sizeof(buf2),
+                        "Calib: pol=%s mean=%.0f m=[%u,%u,%u,%u,%u]/[%u,%u,%u,%u,%u]\r\n",
+                        pol_str,
+                        LineSensor_GetCalibMeanRaw(),
+                        (unsigned)mn[0], (unsigned)mn[1], (unsigned)mn[2],
+                        (unsigned)mn[3], (unsigned)mn[4],
+                        (unsigned)mx[0], (unsigned)mx[1], (unsigned)mx[2],
+                        (unsigned)mx[3], (unsigned)mx[4]);
+                    if (n > 0 && n < (int)sizeof(buf2)) {
+                        App_DebugUartSend(buf2);
+                    }
+                }
+
                 HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
                 filtered_line_error = 0.0f;
                 PID_Reset(&s_line_pid);
                 follower_state = STATE_FOLLOWING;
             }
+            continue;
+        }
+
+        case STATE_CALIB_SENSORES: {
+            /* Calibracao passiva: usuario move o robo, firmware so capta. */
+            uint32_t now = xTaskGetTickCount();
+            uint32_t elapsed_ms = (now - s_calib_sens_start_tick) * portTICK_PERIOD_MS;
+
+            /* LED pisca rapido para feedback visual */
+            if (elapsed_ms - s_calib_sens_last_blink > CALIB_SENS_BLINK_MS) {
+                s_calib_sens_last_blink = elapsed_ms;
+                s_calib_sens_blink_state = !s_calib_sens_blink_state;
+                HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, s_calib_sens_blink_state);
+            }
+
+            /* Timeout: finaliza automaticamente */
+            if (elapsed_ms > CALIB_SENS_TIMEOUT_MS) {
+                LineSensor_SetPolarity(LineSensor_DetectPolarity());
+                LineSensor_FinalizeCalibration();
+                char log_buf[96];
+                LinePolarity pol = LineSensor_GetPolarity();
+                const char *pol_str = (pol == LINE_POLARITY_DARK) ? "DARK" : "LIGHT";
+                uint16_t mn[LINE_SENSOR_COUNT];
+                uint16_t mx[LINE_SENSOR_COUNT];
+                for (uint8_t k = 0U; k < LINE_SENSOR_COUNT; k++) {
+                    LineSensor_GetCalibrationBounds(k, &mn[k], &mx[k]);
+                }
+                int n = snprintf(log_buf, sizeof(log_buf),
+                    "Calib S OK (timeout): pol=%s mean=%.0f m=[%u,%u,%u,%u,%u]/[%u,%u,%u,%u,%u]\r\n",
+                    pol_str, LineSensor_GetCalibMeanRaw(),
+                    (unsigned)mn[0], (unsigned)mn[1], (unsigned)mn[2],
+                    (unsigned)mn[3], (unsigned)mn[4],
+                    (unsigned)mx[0], (unsigned)mx[1], (unsigned)mx[2],
+                    (unsigned)mx[3], (unsigned)mx[4]);
+                if (n > 0 && n < (int)sizeof(log_buf)) {
+                    App_DebugUartSend(log_buf);
+                }
+                HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
+                follower_state = STATE_IDLE;
+                break;
+            }
+
+            /* Captura: le sensores e atualiza min/max */
+            LineSensor_ReadAll(sensor_values);
+            LineSensor_UpdateCalibration(sensor_values);
+
+            /* Motores ficam parados (usuario move o robo manualmente) */
+            cmd.vel_left = 0.0f;
+            cmd.vel_right = 0.0f;
+            g_motor_cmd = cmd;
+            osMessageQueuePut(queueMotorCmdHandle, &cmd, 0, 0);
+            continue;
+        }
+
+        case STATE_CALIB_MOTORES: {
+            /* Calibracao ativa: robo anda sozinho, encoder mede. */
+            uint32_t now = xTaskGetTickCount();
+            uint32_t elapsed_ms = (now - s_calib_mot_start_tick) * portTICK_PERIOD_MS;
+
+            /* LED pisca rapido para feedback visual */
+            if (elapsed_ms - last_led_toggle > CALIB_SENS_BLINK_MS) {
+                last_led_toggle = elapsed_ms;
+                HAL_GPIO_TogglePin(LED_Y_GPIO_Port, LED_Y_Pin);
+            }
+
+            if (s_calib_mot_phase == 0U) {
+                /* Inicio: reseta encoders e comeca a andar para frente */
+                Encoder_ResetCounts();
+                s_calib_mot_phase = 1U;
+                App_DebugUartSend("Calib M: fwd...\r\n");
+            }
+
+            if (elapsed_ms < CALIB_MOT_FWD_MS) {
+                /* Anda reto para frente */
+                cmd.vel_left = CALIB_MOT_SPEED;
+                cmd.vel_right = CALIB_MOT_SPEED;
+            } else if (elapsed_ms < CALIB_MOT_FWD_MS + CALIB_MOT_PAUSE_MS) {
+                /* Parada 1: captura pulsos do trecho de ida */
+                cmd.vel_left = 0.0f;
+                cmd.vel_right = 0.0f;
+                if (s_calib_mot_phase == 1U) {
+                    s_calib_mot_left_fwd = Encoder_GetCountLeft();
+                    s_calib_mot_right_fwd = Encoder_GetCountRight();
+                    s_calib_mot_phase = 2U;
+                    App_DebugUartSend("Calib M: rev...\r\n");
+                }
+            } else if (elapsed_ms < CALIB_MOT_FWD_MS + CALIB_MOT_PAUSE_MS + CALIB_MOT_REV_MS) {
+                /* Anda reto para tras */
+                cmd.vel_left = -CALIB_MOT_SPEED;
+                cmd.vel_right = -CALIB_MOT_SPEED;
+            } else if (elapsed_ms < CALIB_MOT_TOTAL_MS) {
+                /* Parada 2: captura pulsos do trecho de volta e calcula */
+                cmd.vel_left = 0.0f;
+                cmd.vel_right = 0.0f;
+                if (s_calib_mot_phase == 2U) {
+                    int32_t left_rev = Encoder_GetCountLeft() - s_calib_mot_left_fwd;
+                    int32_t right_rev = Encoder_GetCountRight() - s_calib_mot_right_fwd;
+                    if (left_rev < 0) left_rev = -left_rev;
+                    if (right_rev < 0) right_rev = -right_rev;
+                    int32_t total_left = s_calib_mot_left_fwd + left_rev;
+                    int32_t total_right = s_calib_mot_right_fwd + right_rev;
+
+                    if (total_right > 0) {
+                        float ratio = (float)total_left / (float)total_right;
+                        float new_lscl = 1.0f;
+                        float new_rscl = 1.0f;
+                        if (ratio > 1.0f) {
+                            new_lscl = 1.0f / ratio;
+                        } else if (ratio > 0.0f) {
+                            new_rscl = ratio;
+                        }
+                        if (new_lscl < 0.5f) new_lscl = 0.5f;
+                        if (new_lscl > 1.5f) new_lscl = 1.5f;
+                        if (new_rscl < 0.5f) new_rscl = 0.5f;
+                        if (new_rscl > 1.5f) new_rscl = 1.5f;
+                        Motor_SetLeftScale(new_lscl);
+                        Motor_SetRightScale(new_rscl);
+
+                        char log_buf[96];
+                        int n = snprintf(log_buf, sizeof(log_buf),
+                            "Calib M OK: L=%ld R=%ld ratio=%.2f LSCL=%.2f RSCL=%.2f\r\n",
+                            (long)total_left, (long)total_right, ratio,
+                            new_lscl, new_rscl);
+                        if (n > 0 && n < (int)sizeof(log_buf)) {
+                            App_DebugUartSend(log_buf);
+                        }
+                    } else {
+                        App_DebugUartSend("Calib M FAIL: encoders nao geraram pulsos\r\n");
+                    }
+                    HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
+                    s_calib_mot_phase = 3U;
+                    follower_state = STATE_IDLE;
+                    break;
+                }
+            } else {
+                /* Timeout de seguranca */
+                HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
+                follower_state = STATE_IDLE;
+                break;
+            }
+
+            App_ApplyMotorCmd(&cmd);
             continue;
         }
 
@@ -534,6 +757,8 @@ void App_LineCtrlTask(void *argument)
             continue;
 
         case STATE_IN_CROSSING: {
+            /* Cruzamento: andar reto ate atravessar a fita perpendicular.
+             * Mantem velocidade base, sem correcao do PID. */
             uint32_t cross_elapsed = (xTaskGetTickCount() - crossing_start_tick) * portTICK_PERIOD_MS;
             cmd.vel_left = app_config.base_speed;
             cmd.vel_right = app_config.base_speed;
@@ -604,15 +829,42 @@ void App_LineCtrlTask(void *argument)
             }
         }
 
-        /* Crossing detection */
+        /* Deteccao de cruzamento e fim de percurso.
+         * 1o evento LINE_CROSSING: cruzamento (continua reto).
+         * 2o+ evento (LINE_CROSSING ou LINE_FINISHED): linha de chegada
+         * (para imediatamente).
+         *
+         * LINE_CROSSING: 4 sensores ativos, spread alto = fita estreita.
+         * LINE_FINISHED: 5 sensores ativos, spread baixo = fita larga. */
         LineSensor_State line_state = LineSensor_GetState(sensor_values);
-        if (line_state == LINE_CROSSING) {
-            crossing_start_tick = xTaskGetTickCount();
-            follower_state = STATE_IN_CROSSING;
-            App_DebugUartSend("Cruzamento!\r\n");
-            cmd.vel_left = app_config.base_speed;
-            cmd.vel_right = app_config.base_speed;
-            App_ApplyMotorCmd(&cmd);
+        if (line_state == LINE_FINISHED || line_state == LINE_CROSSING) {
+            crossing_count++;
+            char log_buf[64];
+            if (line_state == LINE_FINISHED) {
+                snprintf(log_buf, sizeof(log_buf),
+                    "Fim de percurso (fita larga, evento %d)\r\n",
+                    crossing_count);
+            } else {
+                snprintf(log_buf, sizeof(log_buf),
+                    "Cruzamento (evento %d)\r\n", crossing_count);
+            }
+            App_DebugUartSend(log_buf);
+
+            if (crossing_count >= 2U) {
+                /* Segundo evento: linha de chegada. Para. */
+                Motor_Brake();
+                g_motor_cmd.vel_left = 0.0f;
+                g_motor_cmd.vel_right = 0.0f;
+                HAL_GPIO_WritePin(Buzzer_PWM_GPIO_Port, Buzzer_PWM_Pin, GPIO_PIN_SET);
+                follower_state = STATE_STOPPING;
+                App_DebugUartSend("=== FIM DE PERCURSO ===\r\n");
+            } else {
+                /* Primeiro evento: cruzamento, continua reto. */
+                crossing_start_tick = xTaskGetTickCount();
+                follower_state = STATE_IN_CROSSING;
+                PID_Reset(&s_line_pid);
+                filtered_line_error = 0.0f;
+            }
             continue;
         }
 
@@ -731,7 +983,8 @@ void App_LineCtrlTask(void *argument)
 
 extern ADC_HandleTypeDef hadc2;
 
-static float App_ReadBatteryPct(void)
+/* Leitura crua do ADC da bateria (0-4095) para debug. */
+uint16_t App_ReadBatteryRaw(void)
 {
     ADC_ChannelConfTypeDef sConfig = {0};
     sConfig.Channel = ADC_CHANNEL_4;
@@ -744,6 +997,12 @@ static float App_ReadBatteryPct(void)
     HAL_ADC_PollForConversion(&hadc2, 10);
     uint32_t raw = HAL_ADC_GetValue(&hadc2);
     HAL_ADC_Stop(&hadc2);
+    return (uint16_t)raw;
+}
+
+static float App_ReadBatteryPct(void)
+{
+    uint32_t raw = App_ReadBatteryRaw();
 
     /* Divisor resistivo: Vbat -> R1/R2 -> ADC (3.3V ref, 12-bit)
        Ajustar a escala conforme o divisor real do robo.
@@ -772,6 +1031,19 @@ void App_MotorCtrlTask(void *argument)
 
     for (;;) {
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(10));
+
+        g_motor_cycles++;
+
+        /* Botao de panico: se o switch frontal for pressionado, brake imediato
+         * e vai para STATE_STOPPING. Funciona em qualquer estado. */
+        if (HAL_GPIO_ReadPin(Switch_Fr_GPIO_Port, Switch_Fr_Pin) == GPIO_PIN_SET) {
+            Motor_Brake();
+            g_motor_cmd.vel_left = 0.0f;
+            g_motor_cmd.vel_right = 0.0f;
+            follower_state = STATE_STOPPING;
+            App_DebugUartSend("!!! PANICO !!!\r\n");
+            continue;
+        }
 
         Encoder_Update();
 

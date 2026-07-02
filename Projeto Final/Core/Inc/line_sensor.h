@@ -17,6 +17,7 @@ typedef enum {
     LINE_ON_TRACK,
     LINE_ON_TRACK_LOW_CONTRAST,
     LINE_CROSSING,
+    LINE_FINISHED,
     LINE_LOST,
 } LineSensor_State;
 
@@ -43,5 +44,12 @@ void LineSensor_SetPolarity(LinePolarity polarity);
 LinePolarity LineSensor_GetPolarity(void);
 LinePolarity LineSensor_DetectPolarity(void);
 LinePolarity LineSensor_DetectPolarityFromLayout(const uint16_t values[LINE_SENSOR_COUNT]);
+
+/* Media das leituras cruas durante a calibracao (0 se nunca calibrou).
+ * Util para diagnosticar a pista: ~1000 = linha branca, ~300 = chao preto. */
+float LineSensor_GetCalibMeanRaw(void);
+
+/* Forca a polaridade. -1 = automatica, 0 = DARK, 1 = LIGHT. */
+void LineSensor_SetForcedPolarity(int8_t polarity);
 
 #endif /* LINE_SENSOR_H */

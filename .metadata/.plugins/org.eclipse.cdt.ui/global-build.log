@@ -1,22 +1,30 @@
-16:00:23 **** Incremental Build of configuration Debug for project Projeto Final ****
+23:12:42 **** Incremental Build of configuration Debug for project Projeto Final ****
 make -j8 all 
-arm-none-eabi-gcc "../Core/Src/app_tasks.c" -mcpu=cortex-m4 -std=gnu11 -g3 -DDEBUG -DUSE_HAL_DRIVER -DSTM32G474xx -c -I../Core/Inc -I../Drivers/STM32G4xx_HAL_Driver/Inc -I../Drivers/STM32G4xx_HAL_Driver/Inc/Legacy -I../Drivers/CMSIS/Device/ST/STM32G4xx/Include -I../Drivers/CMSIS/Include -I../Middlewares/Third_Party/FreeRTOS/Source/include -I../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2 -I../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F -O0 -ffunction-sections -fdata-sections -Wall -fstack-usage -fcyclomatic-complexity -MMD -MP -MF"Core/Src/app_tasks.d" -MT"Core/Src/app_tasks.o" --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -o "Core/Src/app_tasks.o"
-arm-none-eabi-gcc "../Core/Src/motor.c" -mcpu=cortex-m4 -std=gnu11 -g3 -DDEBUG -DUSE_HAL_DRIVER -DSTM32G474xx -c -I../Core/Inc -I../Drivers/STM32G4xx_HAL_Driver/Inc -I../Drivers/STM32G4xx_HAL_Driver/Inc/Legacy -I../Drivers/CMSIS/Device/ST/STM32G4xx/Include -I../Drivers/CMSIS/Include -I../Middlewares/Third_Party/FreeRTOS/Source/include -I../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2 -I../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F -O0 -ffunction-sections -fdata-sections -Wall -fstack-usage -fcyclomatic-complexity -MMD -MP -MF"Core/Src/motor.d" -MT"Core/Src/motor.o" --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -o "Core/Src/motor.o"
-arm-none-eabi-gcc -o "Projeto Final.elf" @"objects.list"   -mcpu=cortex-m4 -T"/home/Raissa/Downloads/Unicamp/ES670-2026-GrupoB1/Projeto Final/STM32G474RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="Projeto Final.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+arm-none-eabi-gcc "../Core/Src/main.c" -mcpu=cortex-m4 -std=gnu11 -g3 -DDEBUG -DUSE_HAL_DRIVER -DSTM32G474xx -c -I../Core/Inc -I../Drivers/STM32G4xx_HAL_Driver/Inc -I../Drivers/STM32G4xx_HAL_Driver/Inc/Legacy -I../Drivers/CMSIS/Device/ST/STM32G4xx/Include -I../Drivers/CMSIS/Include -I../Middlewares/Third_Party/FreeRTOS/Source/include -I../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2 -I../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F -O0 -ffunction-sections -fdata-sections -Wall -fstack-usage -fcyclomatic-complexity -MMD -MP -MF"Core/Src/main.d" -MT"Core/Src/main.o" --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -o "Core/Src/main.o"
+../Core/Src/main.c: In function 'HAL_GPIO_EXTI_Callback':
+../Core/Src/main.c:1299:21: warning: implicit declaration of function 'snprintf' [-Wimplicit-function-declaration]
+ 1299 |             int n = snprintf(log_buf, sizeof(log_buf),
+      |                     ^~~~~~~~
+../Core/Src/main.c:1299:21: warning: incompatible implicit declaration of built-in function 'snprintf'
+../Core/Src/main.c:33:1: note: include '<stdio.h>' or provide a declaration of 'snprintf'
+   32 | #include "ultrasonic.h"
+  +++ |+#include <stdio.h>
+   33 | /* USER CODE END Includes */
+arm-none-eabi-gcc -o "Projeto Final.elf" @"objects.list"   -mcpu=cortex-m4 -T"/home/Raissa/Downloads/Unicamp/ES670-2026-GrupoB1/Projeto Final/STM32G474RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="Projeto Final.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -Wl,--start-group -lc -lm -Wl,--end-group
 Finished building target: Projeto Final.elf
  
 arm-none-eabi-size   Projeto\ Final.elf 
 arm-none-eabi-objdump -h -S  Projeto\ Final.elf  > "Projeto Final.list"
    text	   data	    bss	    dec	    hex	filename
-  91148	    544	  22168	 113860	  1bcc4	Projeto Final.elf
+ 103364	    548	  22220	 126132	  1ecb4	Projeto Final.elf
 Finished building: default.size.stdout
  
 Finished building: Projeto Final.list
  
-16:00:30 **** Incremental Build of configuration Debug for project Projeto Final ****
+23:12:48 **** Incremental Build of configuration Debug for project Projeto Final ****
 make -j8 all 
 arm-none-eabi-size   Projeto\ Final.elf 
    text	   data	    bss	    dec	    hex	filename
-  91148	    544	  22168	 113860	  1bcc4	Projeto Final.elf
+ 103364	    548	  22220	 126132	  1ecb4	Projeto Final.elf
 Finished building: default.size.stdout
  

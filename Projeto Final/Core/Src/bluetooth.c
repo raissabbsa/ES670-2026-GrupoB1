@@ -2,6 +2,9 @@
 #include "telemetry.h"
 #include "app_tasks.h"
 #include "motor.h"
+#include "lcd_i2c.h"
+#include "line_sensor.h"
+#include "main.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "cmsis_os2.h"
@@ -12,6 +15,7 @@
 
 static UART_HandleTypeDef *s_huart = NULL;
 static uint8_t s_mon_auto = 0U;
+static uint8_t s_dbg_raw = 0U;   /* eco RAW opcional, desativado por padrao */
 
 static volatile uint8_t s_rx_buf[BT_RX_BUF_SIZE];
 static volatile uint8_t s_rx_head = 0;
@@ -47,6 +51,13 @@ static void BT_Send(const char *msg)
 {
     if (s_huart == NULL || msg == NULL) return;
     HAL_UART_Transmit(s_huart, (uint8_t *)msg, (uint16_t)strlen(msg), 100);
+    /* Eco na serial de debug (LPUART1 115200) para confirmar que
+     * o firmware esta enviando. Liga com $SET,DBGRAW,1. */
+    if (s_dbg_raw) {
+        extern UART_HandleTypeDef hlpuart1;
+        HAL_UART_Transmit(&hlpuart1, (uint8_t *)">>", 2, 50);
+        HAL_UART_Transmit(&hlpuart1, (uint8_t *)msg, (uint16_t)strlen(msg), 100);
+    }
 }
 
 static void BT_Trim(char *s)
@@ -76,31 +87,102 @@ static void BT_Trim(char *s)
 
 static void BT_ProcessLine(char *line)
 {
-    /* Echo em HEX de toda linha recebida. Util para diagnosticar
-     * terminais que mandam caracteres invisíveis ou HC-05 corrompendo. */
-    {
-        char hex_buf[80];
-        int n = 0;
-        int llen = (int)strlen(line);
-        int show = (llen < 16) ? llen : 16;
-        for (int i = 0; i < show; i++) {
-            n += snprintf(hex_buf + n, sizeof(hex_buf) - n,
-                          "%02X ", (uint8_t)line[i]);
-        }
+    /* Eco RAW opcional (desligado por padrao). Mostra a linha como texto
+     * legivel com escape para caracteres de controle. Liga com
+     * $SET,DBGRAW,1. */
+    if (s_dbg_raw) {
         char echo[96];
-        int elen = snprintf(echo, sizeof(echo), "$RAW[%d]=%s\r\n", llen, hex_buf);
-        if (elen > 0 && elen < (int)sizeof(echo)) {
-            BT_Send(echo);
+        int pos = 0;
+        pos += snprintf(echo + pos, sizeof(echo) - pos, "$RAW[%d]=\"", (int)strlen(line));
+        for (int i = 0; line[i] != '\0' && pos < (int)sizeof(echo) - 8; i++) {
+            unsigned char c = (unsigned char)line[i];
+            if (c >= 0x20 && c < 0x7F) {
+                echo[pos++] = (char)c;
+            } else {
+                pos += snprintf(echo + pos, sizeof(echo) - pos, "<%02X>", c);
+            }
         }
+        if (pos < (int)sizeof(echo) - 2) {
+            echo[pos++] = '"';
+            echo[pos++] = '\r';
+            echo[pos++] = '\n';
+            echo[pos] = '\0';
+        }
+        BT_Send(echo);
     }
 
     if (strcmp(line, "$HELP") == 0) {
-        BT_Send("$HELP,GET|PID|MOT|MON|ALL,SET|KP|KI|KD|SPD|LSCL|RSCL|MON,CMD|START|STOP|FWD|REV|LEFT|RIGHT|JOY,RAW\r\n");
+        BT_Send("$HELP,GET|PID|MOT|MON|ALL,SET|KP|KI|KD|SPD|LSCL|RSCL|LCDDBG|DBGRAW|MON|POL,CMD|START|STOP|FWD|REV|LEFT|RIGHT|JOY|CALIB,S|CALIB,M\r\n");
         return;
     }
 
     /* Aceita tanto "$GET,PID" quanto "$GETPID" (alguns terminais removem a virgula). */
     const char *get_param = NULL;
+
+    /* Parser de caractere unico (car controller do app "Arduino Bluetooth Control"):
+     * F = frente, B = re, L = esquerda, R = direita,
+     * G = frente-esquerda, H = frente-direita,
+     * I = re-esquerda, J = re-direita, S = para.
+     * A linha deve ter 1 caractere + (opcional) CR/LF. */
+    {
+        int llen_cmd = (int)strlen(line);
+        if (llen_cmd == 1 || (llen_cmd == 2 && line[1] == ' ')) {
+            char c = line[0];
+            float base = app_config.base_speed;
+            MotorCmd_t mcmd = {0.0f, 0.0f};
+            uint8_t ok_car = 1U;
+            switch (c) {
+                case 'F': case 'f':
+                    mcmd.vel_left = base;
+                    mcmd.vel_right = base;
+                    break;
+                case 'B': case 'b':
+                    mcmd.vel_left = -base;
+                    mcmd.vel_right = -base;
+                    break;
+                case 'L': case 'l':
+                    mcmd.vel_left = -base * 0.7f;
+                    mcmd.vel_right = base;
+                    break;
+                case 'R': case 'r':
+                    mcmd.vel_left = base;
+                    mcmd.vel_right = -base * 0.7f;
+                    break;
+                case 'G': case 'g':
+                    mcmd.vel_left = 0.0f;
+                    mcmd.vel_right = base;
+                    break;
+                case 'H': case 'h':
+                    mcmd.vel_left = base;
+                    mcmd.vel_right = 0.0f;
+                    break;
+                case 'I': case 'i':
+                    mcmd.vel_left = 0.0f;
+                    mcmd.vel_right = -base;
+                    break;
+                case 'J': case 'j':
+                    mcmd.vel_left = -base;
+                    mcmd.vel_right = 0.0f;
+                    break;
+                case 'S': case 's': case '0':
+                    mcmd.vel_left = 0.0f;
+                    mcmd.vel_right = 0.0f;
+                    break;
+                default:
+                    ok_car = 0U;
+                    break;
+            }
+            if (ok_car) {
+                follower_state = STATE_MANUAL;
+                g_motor_cmd = mcmd;
+                /* Copia local para evitar warning de volatile descartado */
+                MotorCmd_t cmd_copy = mcmd;
+                osMessageQueuePut(queueMotorCmdHandle, &cmd_copy, 0, 0);
+                BT_Send("$OK\r\n");
+                return;
+            }
+        }
+    }
     if (strncmp(line, "$GET,", 5) == 0) {
         get_param = line + 5;
     } else if (strncmp(line, "$GET", 4) == 0 && line[4] != ',') {
@@ -167,54 +249,6 @@ static void BT_ProcessLine(char *line)
 
     if (strncmp(line, "$SET,", 5) == 0) {
         char *param = line + 5;
-        BT_Trim(param);
-
-        if (strcmp(param, "PID") == 0) {
-            float kp, ki, kd, spd;
-            char buf[64];
-            App_GetLinePidConfig(&kp, &ki, &kd, &spd);
-            int len = snprintf(buf, sizeof(buf),
-                "$PID,%.3f,%.3f,%.3f,%.3f\r\n", kp, ki, kd, spd);
-            if (len > 0 && len < (int)sizeof(buf)) {
-                BT_Send(buf);
-            }
-        } else if (strcmp(param, "MOT") == 0) {
-            float ls, rs;
-            char buf[48];
-            Motor_GetScales(&ls, &rs);
-            int len = snprintf(buf, sizeof(buf),
-                "$MOT,%.3f,%.3f\r\n", ls, rs);
-            if (len > 0 && len < (int)sizeof(buf)) {
-                BT_Send(buf);
-            }
-        } else if (strcmp(param, "MON") == 0) {
-            Telemetry_t telem;
-            char buf[80];
-            Telemetry_Get(&telem);
-            int len = snprintf(buf, sizeof(buf),
-                "$MON,%d,%d,%d,%d,%u,%u\r\n",
-                (int)telem.distance_cm,
-                (int)telem.speed_cms,
-                (int)telem.heading_deg,
-                (int)telem.battery_pct,
-                (unsigned)telem.obstacle_cm,
-                (unsigned)telem.state);
-            if (len > 0 && len < (int)sizeof(buf)) {
-                BT_Send(buf);
-            }
-        } else {
-            char echo_buf[96];
-            int echo_len = snprintf(echo_buf, sizeof(echo_buf), "$ECHO,%s\r\n", line);
-            if (echo_len > 0 && echo_len < (int)sizeof(echo_buf)) {
-                BT_Send(echo_buf);
-            }
-            BT_Send("$ERR,GET\r\n");
-        }
-        return;
-    }
-
-    if (strncmp(line, "$SET,", 5) == 0) {
-        char *param = line + 5;
         char *comma = strchr(param, ',');
         if (!comma) {
             BT_Send("$ERR\r\n");
@@ -245,6 +279,18 @@ static void BT_ProcessLine(char *line)
             ok = 1U;
         } else if (strcmp(param, "MON") == 0) {
             s_mon_auto = (val >= 0.5f) ? 1U : 0U;
+            ok = 1U;
+        } else if (strcmp(param, "LCDDBG") == 0) {
+            LCD_SetDebugMode(val >= 0.5f ? 1U : 0U);
+            ok = 1U;
+        } else if (strcmp(param, "DBGRAW") == 0) {
+            s_dbg_raw = (val >= 0.5f) ? 1U : 0U;
+            ok = 1U;
+        } else if (strcmp(param, "POL") == 0) {
+            /* -1 = auto, 0 = DARK, 1 = LIGHT */
+            if (val < -0.5f) LineSensor_SetForcedPolarity(-1);
+            else if (val < 0.5f) LineSensor_SetForcedPolarity(0);
+            else LineSensor_SetForcedPolarity(1);
             ok = 1U;
         }
 
@@ -283,6 +329,32 @@ static void BT_ProcessLine(char *line)
             ok = 1U;
         } else if (strcmp(cmd, "START") == 0) {
             follower_state = STATE_ALIGNING;
+            ok = 1U;
+        } else if (strncmp(cmd, "CALIB,S", 7) == 0) {
+            /* $CMD,CALIB,S        -> inicia captura passiva
+             * $CMD,CALIB,S,STOP   -> para e finaliza */
+            if (cmd[7] == ',' && cmd[8] == 'S' && cmd[9] == 'T' &&
+                cmd[10] == 'O' && cmd[11] == 'P') {
+                /* Para a calibracao passiva */
+                if (follower_state == STATE_CALIB_SENSORES) {
+                    LineSensor_SetPolarity(LineSensor_DetectPolarity());
+                    LineSensor_FinalizeCalibration();
+                    HAL_GPIO_WritePin(LED_Y_GPIO_Port, LED_Y_Pin, GPIO_PIN_SET);
+                    follower_state = STATE_IDLE;
+                    BT_Send("$Calib S OK (stop)\r\n");
+                } else {
+                    BT_Send("$ERR,not running\r\n");
+                }
+            } else if (cmd[7] == '\0') {
+                /* Inicia calibracao passiva */
+                App_StartCalibSensores();
+            } else {
+                BT_Send("$ERR,CALIB,S\r\n");
+            }
+            ok = 1U;
+        } else if (strcmp(cmd, "CALIB,M") == 0) {
+            /* Inicia calibracao ativa de motores */
+            App_StartCalibMotores();
             ok = 1U;
         }
 

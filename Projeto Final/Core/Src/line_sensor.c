@@ -23,16 +23,17 @@ extern ADC_HandleTypeDef hadc5;
 #define LINE_ERROR_CLAMP     0.35f
 #define LINE_OUTLIER_DELTA   120U
 #define LINE_ADC_MAX_VALID   2000U
-#define LINE_MIN_NORM_SPREAD    0.18f
+#define LINE_MIN_NORM_SPREAD    0.05f
 #define LINE_NORM_MARGIN_MIN    0.08f
 #define LINE_OFFSET_MIN_SPREAD  38U
 
 /* Defaults por sensor (5 valores).
- * Apertados para o range real (~150-280 raw nos logs do grupo B1)
- * para que o spread normalizado fique util mesmo sem calibracao dinamica.
+ * Para pista do professor (chao preto, linha branca):
+ *   Chao preto ~ 300 raw (baixa reflexão)
+ *   Linha branca ~ 1000-1400 raw (alta reflexão)
  * Ajustar apos medicao real com a fita do grupo. */
-static const uint16_t LINE_CALIB_DEFAULT_MIN_S[LINE_SENSOR_COUNT] = { 150, 150, 150, 150, 150 };
-static const uint16_t LINE_CALIB_DEFAULT_MAX_S[LINE_SENSOR_COUNT] = { 280, 280, 280, 280, 280 };
+static const uint16_t LINE_CALIB_DEFAULT_MIN_S[LINE_SENSOR_COUNT] = { 300, 300, 300, 300, 300 };
+static const uint16_t LINE_CALIB_DEFAULT_MAX_S[LINE_SENSOR_COUNT] = { 1100, 1100, 1100, 1100, 1100 };
 
 static uint16_t s_min[LINE_SENSOR_COUNT];
 static uint16_t s_max[LINE_SENSOR_COUNT];
@@ -48,6 +49,14 @@ static uint32_t s_calib_sum_center = 0;
 static uint32_t s_calib_count = 0;
 static uint8_t s_calib_valid = 0U;
 static uint8_t s_calib_collecting = 0U;
+/* Media das leituras cruas durante a janela de calibracao. Usada para
+ * detectar a polaridade: media ALTA -> linha branca (LIGHT),
+ * media BAIXA -> linha preta (DARK). */
+static uint32_t s_calib_sum_raw = 0U;
+static uint32_t s_calib_count_raw = 0U;
+static float s_calib_mean_raw = 0.0f;
+/* -1 = deteccao automatica, 0 = DARK forçado, 1 = LIGHT forçado. */
+static int8_t s_forced_polarity = -1;
 
 #define LINE_ADC_SAMPLES 4U
 
@@ -249,6 +258,9 @@ void LineSensor_ResetCalibration(void)
     }
     s_calib_sum_center = 0;
     s_calib_count = 0;
+    s_calib_sum_raw = 0U;
+    s_calib_count_raw = 0U;
+    s_calib_mean_raw = 0.0f;
     s_calib_valid = 0U;
     s_calib_collecting = 1U;
 }
@@ -266,7 +278,9 @@ void LineSensor_UpdateCalibration(const uint16_t values[LINE_SENSOR_COUNT])
         if (values[i] < s_min[i]) {
             s_min[i] = values[i];
         }
+        s_calib_sum_raw += values[i];
     }
+    s_calib_count_raw++;
 
     s_calib_sum_center += values[2];
     s_calib_count++;
@@ -296,6 +310,12 @@ void LineSensor_FinalizeCalibration(void)
             s_max[i] = s_last_valid_max[i];
         }
         s_calib_valid = 1U;
+    }
+
+    /* Calcula media das leituras cruas durante a calibracao.
+     * Usada para detectar a polaridade (linha branca vs linha preta). */
+    if (s_calib_count_raw > 0U) {
+        s_calib_mean_raw = (float)s_calib_sum_raw / (float)s_calib_count_raw;
     }
 
     s_calib_collecting = 0U;
@@ -377,7 +397,33 @@ float LineSensor_GetCentroidIndex(const uint16_t values[LINE_SENSOR_COUNT])
         norm_mean /= (float)LINE_SENSOR_COUNT;
 
         float norm_spread = norm_max - norm_min;
+
         if (norm_spread < LINE_MIN_NORM_SPREAD) {
+            /* Norm spread baixo (leitura "plana"). Usa o pico + vizinhos
+             * para estimar a posicao. Antes retornava 2.0 direto, o que
+             * zerava o erro quando a linha estava em uma ponta mas a
+             * leitura era quase uniforme (problema classico com defaults
+             * de calibracao com range largo). */
+            uint8_t peak = 0U;
+            for (uint8_t i = 1U; i < LINE_SENSOR_COUNT; i++) {
+                if (normalized[i] > normalized[peak]) {
+                    peak = i;
+                }
+            }
+            /* Se o pico for significativo, faz interpolacao com vizinhos. */
+            if (normalized[peak] > 0.08f) {
+                float w_peak = normalized[peak];
+                float w_left = (peak > 0) ? normalized[peak - 1] : 0.0f;
+                float w_right = (peak < (LINE_SENSOR_COUNT - 1)) ? normalized[peak + 1] : 0.0f;
+                float sw = w_peak + w_left + w_right;
+                if (sw > 0.01f) {
+                    float sp = (float)peak * w_peak;
+                    if (peak > 0) sp += (float)(peak - 1) * w_left;
+                    if (peak < (LINE_SENSOR_COUNT - 1)) sp += (float)(peak + 1) * w_right;
+                    return sp / sw;
+                }
+            }
+            /* Leitura realmente uniforme (todos mesmos). */
             return 2.0f;
         }
 
@@ -400,6 +446,27 @@ float LineSensor_GetCentroidIndex(const uint16_t values[LINE_SENSOR_COUNT])
 
         if (sum_w > 0.01f) {
             return sum_pos / sum_w;
+        }
+
+        /* Se chegou aqui, ha spread mas o threshold nao foi atingido.
+         * Usa pico + vizinhos para nao jogar o erro pra zero. */
+        {
+            uint8_t peak = 0U;
+            for (uint8_t i = 1U; i < LINE_SENSOR_COUNT; i++) {
+                if (normalized[i] > normalized[peak]) {
+                    peak = i;
+                }
+            }
+            float w_peak = normalized[peak];
+            float w_left = (peak > 0) ? normalized[peak - 1] : 0.0f;
+            float w_right = (peak < (LINE_SENSOR_COUNT - 1)) ? normalized[peak + 1] : 0.0f;
+            float sw = w_peak + w_left + w_right;
+            if (sw > 0.01f) {
+                float sp = (float)peak * w_peak;
+                if (peak > 0) sp += (float)(peak - 1) * w_left;
+                if (peak < (LINE_SENSOR_COUNT - 1)) sp += (float)(peak + 1) * w_right;
+                return sp / sw;
+            }
         }
 
         return 2.0f;
@@ -700,15 +767,20 @@ LineSensor_State LineSensor_GetState(uint16_t values[LINE_SENSOR_COUNT])
         uint8_t active = LineSensor_CountNormalizedActive(values);
 
         if (active == 0U) {
-            /* Sem nenhum sensor "forte" pelo threshold, mas pode haver
-             * linha com baixo contraste. So considera LOST se nem o
-             * spread bruto indicar variacao. */
             if (spread < LINE_MIN_RAW_SPREAD) {
                 return LINE_LOST;
             }
             return LINE_ON_TRACK_LOW_CONTRAST;
         }
 
+        /* Distincao por largura da fita perpendicular:
+         * - active == 5 E spread baixo (todos leem igual): fita LARGA
+         *   cobrindo todos os sensores = linha de chegada.
+         * - active >= 4 E spread alto (parte na linha, parte no chao):
+         *   fita ESTREITA em T ou X = cruzamento (passa reto). */
+        if (active == 5U && spread < 50U) {
+            return LINE_FINISHED;
+        }
         if (active >= 4U && spread > 55U) {
             return LINE_CROSSING;
         }
@@ -798,6 +870,22 @@ LinePolarity LineSensor_DetectPolarityFromLayout(const uint16_t values[LINE_SENS
 
 LinePolarity LineSensor_DetectPolarity(void)
 {
+    /* Se o usuario forcou a polaridade via $SET,POL, usa ela. */
+    if (s_forced_polarity == 0) return LINE_POLARITY_DARK;
+    if (s_forced_polarity == 1) return LINE_POLARITY_LIGHT;
+
+    /* Heuristica baseada na media das leituras durante a calibracao:
+     * - Media alta (>= 700): chao escuro / linha branca -> LIGHT
+     * - Media baixa (< 500): chao claro / linha preta -> DARK
+     * - Media intermediaria: cai na logica antiga. */
+    if (s_calib_mean_raw >= 700.0f) {
+        return LINE_POLARITY_LIGHT;
+    }
+    if (s_calib_mean_raw > 0.0f && s_calib_mean_raw < 500.0f) {
+        return LINE_POLARITY_DARK;
+    }
+
+    /* Fallback: logica antiga baseada no centro. */
     if (s_calib_count == 0U) {
         return LINE_POLARITY_LIGHT;
     }
@@ -817,4 +905,16 @@ LinePolarity LineSensor_DetectPolarity(void)
         return LINE_POLARITY_LIGHT;
     }
     return LINE_POLARITY_DARK;
+}
+
+float LineSensor_GetCalibMeanRaw(void)
+{
+    return s_calib_mean_raw;
+}
+
+void LineSensor_SetForcedPolarity(int8_t polarity)
+{
+    if (polarity == 0) s_forced_polarity = 0;
+    else if (polarity == 1) s_forced_polarity = 1;
+    else s_forced_polarity = -1;
 }

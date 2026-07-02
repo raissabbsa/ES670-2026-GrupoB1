@@ -15,6 +15,10 @@ void LCD_SetCursor(uint8_t row, uint8_t col);
 void LCD_Print(const char *str);
 void LCD_PrintAt(uint8_t row, uint8_t col, const char *str);
 
+/* Liga/desliga modo debug do LCD (mostra encoder count + raw battery). */
+void LCD_SetDebugMode(uint8_t enable);
+uint8_t LCD_GetDebugMode(void);
+
 void App_LcdTask(void *argument);
 
 #endif

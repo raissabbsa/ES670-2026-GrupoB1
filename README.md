@@ -1,198 +1,209 @@
 # Seguidor de Linha — Grupo B1 (ES670)
 
-Robô seguidor de linha com STM32G474 (Nucleo-G474RE), FreeRTOS, sensores IR, LCD I2C, Bluetooth HC-05 e ultrassom HC-SR04.
+Robô seguidor de linha com STM32G474 (Nucleo-G474RE), FreeRTOS, 5 sensores IR, LCD I2C, Bluetooth HC-05, ultrassom HC-SR04 e encoders.
 
-## Status atual
+## Status do projeto (jul/2026)
 
-O robô **segue a linha de forma razoável**, mas ainda **sai na largada** em alguns testes. A calibração do PID e da velocidade base precisa de ajuste fino no pista real. Use o Bluetooth para tunar sem recompilar (veja seção abaixo).
+### Pontuação (10 pontos no total)
 
-**Problema conhecido:** nos primeiros ~500 ms o erro do sensor pode oscilar (spread alto na largada), gerando correção forte. Já existe rampa de correção e zona morta, mas os ganhos (`Kp`, `SPD`) ainda precisam ser afinados para o seu chão e fita.
+| Item | Pontos | Status |
+|------|--------|--------|
+| (2,0) Seguir linha corretamente | 2,0 | OK |
+| (0,5) Passar pelo cruzamento | 0,5 | OK |
+| (0,5) Cumprir trajeto em ate 1:30 | 0,5 | OK |
+| (0,5) Parar no fim do percurso | 0,5 | OK |
+| (1,0) Monitoramento via celular (1Hz) | 1,0 | OK |
+| (1,0) Configuracao via celular | 1,0 | OK |
+| (0,5) Controle manual via celular | 0,5 | OK (car controller) |
+| (1,0) Seguranca (obstaculo + colisao) | 1,0 | OK |
+| (1,5) LCD 1Hz (D, V, H, Bat) | 1,5 | OK (depende de encoders) |
+| (1,5) FreeRTOS | 1,5 | OK |
 
----
+### O que foi implementado
 
-## O que foi implementado
+**Seguir linha:**
+- Maquina de estados IDLE -> ALIGNING -> CALIBRATING -> FOLLOWING
+- PID adaptativo com max correction 0.18 (reta) e 0.30 (curva)
+- Dead reckoning em linha perdida (estilo ES070, sem busca)
+- Cruzamento: detecta `LINE_CROSSING` e anda reto 300ms
+- Parada por timeout (90s) ou via botao de panico
 
-### Seguir linha (em progresso)
+**Calibracao automatica (sem chute manual):**
+- `$CMD,CALIB,S` - calibracao passiva de sensores. O usuario move o robo manualmente sobre chao-fita-chao. O firmware captura min/max reais e detecta polaridade. Termina com `$CMD,CALIB,S,STOP` ou timeout de 30s.
+- `$CMD,CALIB,M` - calibracao ativa de motores. O robo anda sozinho 2s para frente, para 200ms, anda 1s para tras, para 200ms. Encoder mede quanto cada roda andou. Calcula `ratio = L/R` e aplica LSCL/RSCL automaticamente.
 
-| Item | Status |
-|------|--------|
-| Máquina de estados (IDLE → ALIGN → CALIB → FOLLOW) | OK |
-| PID de linha (proporcional, sinal corrigido) | OK, precisa tuning |
-| Leitura 5 sensores IR via ADC | OK |
-| Busca quando perde a linha (pivot) | OK |
-| Passagem por cruzamento (`STATE_IN_CROSSING`, 300 ms reto) | OK |
-| Parada por timeout / fim de percurso | OK |
-| Parada por obstáculo (ultrassom) | OK |
+**Bluetooth (HC-05, 9600 baud):**
+- `$SET,KP/KI/KD/SPD/LSCL/RSCL` - configura parametros
+- `$SET,POL,0|1|-1` - forca polaridade (DARK/LIGHT/automatico)
+- `$SET,LCDDBG,1` - ativa modo debug no LCD (mostra MC, encoders, bateria raw)
+- `$SET,DBGRAW,1` - ativa eco RAW de cada linha recebida (com echo na serial de debug)
+- `$GET,PID` / `$GET,ALL` - le parametros
+- `$GET,MON` - telemetria (D, V, H, Bat, obs, state)
+- `$CMD,CALIB,S` / `$CMD,CALIB,M` - inicia calibracoes
+- `$CMD,START` / `$CMD,STOP` - inicia/para seguimento
+- `$CMD,FWD/REV/LEFT/RIGHT` - manual
+- Car controller F/B/L/R/G/H/I/J/S (1 char) - Arduino Bluetooth Control
 
-### Novos módulos
+**Seguranca:**
+- Ultrassom HC-SR04: le distancia a cada 50ms, com debounce de 3 leituras abaixo de 10cm antes de parar. Ativa buzzer.
+- Botao de panico frontal (Switch_Fr, PD2): a cada ciclo do motor task, se pressionado, `Motor_Brake()` imediato e `STATE_STOPPING`.
 
-| Arquivo | Função |
-|---------|--------|
-| `telemetry.c/h` | Dados compartilhados (distância, velocidade, heading, bateria) com mutex FreeRTOS |
-| `lcd_i2c.c/h` | LCD 16x2 via PCF8574 (I2C2), atualização 1 Hz |
-| `bluetooth.c/h` | HC-05 (USART3): monitoramento, configuração e controle manual |
-| `ultrasonic.c/h` | HC-SR04: distância + parada de segurança + buzzer |
+**LCD (PCF8574 16x2, I2C2, 1Hz):**
+- Modo normal: `D:NNcm V:NN` (distancia e velocidade), `H:NNN Bat:NN%` (heading e bateria)
+- Modo debug (`$SET,LCDDBG,1`): `MC:NNNNN E:NNNN` (motor cycles + encoder left), `Bat:NNNN R:NNNN` (bateria raw + encoder right)
 
-### Correções importantes já feitas
+**FreeRTOS:**
+- 5 tasks: LineCtrl (50Hz), MotorCtrl (100Hz), LCD (1Hz), BT (20Hz), e controle implicito via estado global
+- 1 mutex (Telemetry)
+- 1 queue (MotorCmd)
+- vTaskDelayUntil em todas as tasks
 
-1. **PID invertido** — `vel_left = base - correction` (antes corrigia para o lado errado).
-2. **Busca invertida** — ao perder a linha, gira na direção onde ela foi vista por último.
-3. **Prioridades FreeRTOS** — `LineCtrlTask` = Normal, `MotorCtrlTask` = AboveNormal.
-4. **Fila de motores** — `sizeof(MotorCmd_t)`, não `uint32_t`.
-5. **Erro do sensor** — centroide com zona morta e filtro de spread alto na largada.
-6. **Rampa de correção** — primeiros 500 ms com correção gradual.
+### Comportamento de seguir linha
 
-### Arquitetura FreeRTOS
+| Estado | Acao |
+|--------|------|
+| Reta (`|err|<0.15`) | Base 0.30, max correction 0.18 |
+| Curva aberta (0.15-0.25) | Base 0.18, max correction 0.30 |
+| Curva fechada (`|err|>0.30`) | Pivot (roda lenta para) |
+| Linha perdida 100ms | Continua com ultimo erro (dead reckoning) |
+| Linha perdida >2s | Para motores |
 
-```
-MotorCtrlTask   (100 Hz, AboveNormal) — motores, encoder, telemetria
-LineCtrlTask    ( 50 Hz, Normal)      — sensores, PID, ultrassom, estados
-LcdTask         (  1 Hz, BelowNormal) — LCD 16x2
-BluetoothTask   ( 20 Hz, BelowNormal) — HC-05 UART
-```
+### Defaults no firmware
 
-Recursos: `osMessageQueue` (comandos motor), `osMutex` (telemetria), `vTaskDelayUntil` em todas as tasks.
+| Parametro | Valor | Descricao |
+|-----------|-------|-----------|
+| KP | 0.35 | Ganho proporcional |
+| KI | 0.0 | Sem integrador (estavel) |
+| KD | 0.04 | Derivativo com filtro passa-baixa |
+| base_speed | 0.30 | Velocidade base em reta |
+| LSCL | 0.95 | Escala motor esquerdo |
+| RSCL | 1.20 | Escala motor direito |
+| min sensor | 300 | Chao preto |
+| max sensor | 1100 | Linha branca |
 
 ---
 
 ## Como rodar o projeto
 
-### 1. Clonar e abrir
-
-```bash
-git clone https://github.com/raissabbsa/ES670-2026-GrupoB1.git
-cd ES670-2026-GrupoB1
-```
+### Compilar e gravar
 
 1. Abra o **STM32CubeIDE**.
-2. **File → Open Projects from File System** → pasta `Projeto Final`.
-3. Abra `Projeto Final.ioc` e clique em **Generate Code** (cria `Drivers/` e `Middlewares/` localmente — **não commitar**).
-4. **Project → Clean** → **Project → Build All**.
+2. **File -> Open Projects from File System** -> pasta `Projeto Final`.
+3. Abra `Projeto Final.ioc` e clique em **Generate Code** (cria `Drivers/` e `Middlewares/` localmente - nao commitar).
+4. **Project -> Clean** -> **Project -> Build All**.
+5. **Run -> Debug** (ou Flash) na placa Nucleo via USB.
 
-> Se o linker reclamar de `.c` faltando, confira se `telemetry.c`, `lcd_i2c.c`, `bluetooth.c` e `ultrasonic.c` estão no build (Generate Code costuma incluir arquivos em `Core/Src` automaticamente).
+### Conexao serial
 
-### 2. Gravar e testar na placa
+- **LPUART1** (debug): 115200 baud - usa para ver log de calibracao, telemetria, mensagens de estado
+- **USART3** (Bluetooth HC-05): 9600 baud - comandos do celular
 
-1. Conecte a Nucleo via USB.
-2. **Run → Debug** (ou Flash).
-3. Serial de debug: **LPUART1**, **115200 baud** (minicom, PuTTY, etc.).
+### Botoes
 
-### 3. Controles na placa
-
-| Ação | Botão |
+| Acao | Botao |
 |------|-------|
-| Iniciar (alinha + calibra + segue) | **Enter** |
+| Iniciar (alinha + calibra + segue) | **Enter** / **Cima** |
 | Modo debug dos sensores IR | **Baixo** (toggle) |
-| Parar durante seguimento | **Switch frontal** |
+| Parada de emergencia (brake imediato) | **Switch frontal** |
 
-### 4. Saída serial esperada (debug)
+### Fluxo de uso recomendado
 
-```
-Robo OK - serial 115200
-Enter=inicia (alinha sozinho)
-=== SEGUINDO LINHA ===
-F ON vl=35 vr=35 adj=0 spr=55
-```
+1. Ligue a placa. O log aparece no LPUART1.
+2. **Calibre os sensores** (passivo, usuario move):
+   - Mande `$CMD,CALIB,S` (LED pisca rapido)
+   - Mova o robo sobre a pista (chao-fita-chao-fita-chao)
+   - Mande `$CMD,CALIB,S,STOP`
+   - Log: `Calib S OK: pol=LIGHT mean=850 m=[...]/[...]`
+3. **Calibre os motores** (ativo, robo anda):
+   - Coloque o robo em superficie plana, ~50cm de espaco
+   - Mande `$CMD,CALIB,M`
+   - Robo anda sozinho 3s
+   - Log: `Calib M OK: L=265 R=320 ratio=0.83 LSCL=0.83 RSCL=1.00`
+4. **Siga a linha**:
+   - Coloque o robo sobre a fita
+   - Aperte **Enter** ou mande `$CMD,START`
+   - Log: `=== ALINHANDO ===` -> `=== CALIBRANDO (1.2s) ===` -> `=== SEGUINDO LINHA ===`
 
-- `adj` = erro filtrado × 100 (0 = no centro).
-- `spr` = contraste entre sensores (quanto maior, mais “confuso” o instante).
-- `BUSCA` = linha perdida, procurando.
+### Fluxo alternativo (calibracao manual)
 
----
+Se a calibracao automatica nao funcionar, ajuste via Bluetooth:
+- `$SET,LSCL,X` / `$SET,RSCL,X` - escala dos motores (padrao 1.0/1.0)
+- `$SET,SPD,X` - velocidade base
+- `$SET,KP,X` / `$SET,KI,X` / `$SET,KD,X` - parametros PID
 
-## Ajustar sem recompilar (Bluetooth)
+Para `$SET,LSCL,1.10` se o robo puxa para esquerda, ou `$SET,RSCL,1.10` se puxa para direita.
 
-1. Pareie o HC-05 no celular (PIN padrão costuma ser `1234` ou `0000`).
-2. Instale **Serial Bluetooth Terminal** (Android) ou similar.
-3. Conecte ao módulo e envie comandos (uma linha por comando):
+### Diagnostico
 
-### Tunagem do seguidor
+Se algo nao funcionar:
 
-```
-$SET,KP,0.45
-$SET,KI,0.00
-$SET,KD,0.00
-$SET,SPD,0.35
-```
+1. **Mande `$SET,DBGRAW,1`** para ver cada linha recebida (com eco na serial de debug tambem).
+2. **Mande `$SET,LCDDBG,1`** para ver:
+   - `MC:NNNNN` (motor cycles, deve crescer ~100/s)
+   - `E:NNNN` (encoder left, deve crescer quando a roda gira)
+   - `Bat:NNNN` (ADC raw bateria, deve ser >100)
+   - `R:NNNN` (encoder right)
+3. **Mande `$GET,PID`** para ver parametros ativos.
+4. **Mande `$GET,MON`** para ver telemetria.
 
-Resposta: `$OK`
+### Arduino Bluetooth Control (app Android)
 
-| Parâmetro | Efeito | Valores atuais no código |
-|-----------|--------|--------------------------|
-| `KP` | Força da correção na curva | 0.45 (subir = corrige mais, pode oscilar) |
-| `KI` | Corrige erro persistente | 0.0 |
-| `KD` | Amortecimento | 0.0 |
-| `SPD` | Velocidade base (0.0–1.0) | 0.35 |
-
-**Sugestão para quem continuar o tuning:**
-
-- Se **sai da linha na largada**: baixe `KP` (`0.35`) e `SPD` (`0.30`).
-- Se **não corrige curva**: suba `KP` aos poucos (`0.50`, `0.55`).
-- Se **oscila (zigue-zague)**: baixe `KP` ou suba zona morta no código (`line_sensor.c`).
-
-### Monitoramento (1 Hz automático)
-
-O robô envia:
-
-```
-$MON,dist_cm,vel_cms,heading_deg,bat_pct,obst_cm,state
-```
-
-### Controle manual
-
-```
-$CMD,FWD
-$CMD,REV
-$CMD,LEFT
-$CMD,RIGHT
-$CMD,STOP
-$CMD,START
-```
+1. Instale o app **Arduino Bluetooth Control** (no Google Play).
+2. Conecte ao HC-05 (PIN padrao 1234 ou 0000).
+3. Va em **Car Controller** (ou configure botoes para enviar 1 caractere).
+4. Configure os botoes:
+   - Botao cima: envia `F` (frente)
+   - Botao baixo: envia `B` (re)
+   - Botao esquerda: envia `L`
+   - Botao direita: envia `R`
+5. Use tambem a aba **Terminal** para comandos completos: `$GET,PID`, `$SET,KP,0.30`, etc.
 
 ---
 
-## O que NÃO commitar
+## Estrutura do codigo
 
-Gerados localmente pelo CubeMX / build — já estão no `.gitignore`:
+```
+Projeto Final/Core/
+├── Inc/
+│   ├── app_tasks.h         # estados, AppConfig_t, prototipos
+│   ├── bluetooth.h         # buffer RX BT
+│   ├── encoder.h           # TIM16/17 encoder
+│   ├── lcd_i2c.h           # PCF8574 LCD
+│   ├── line_sensor.h       # 5 sensores IR
+│   ├── main.h              # pinagens, handles
+│   ├── motor.h             # PWM TIM1 motores
+│   ├── pid.h               # controlador PID
+│   ├── telemetry.h         # struct Telemetry_t, mutex
+│   └── ultrasonic.h        # HC-SR04
+└── Src/
+    ├── app_freertos.c      # init das tarefas
+    ├── app_tasks.c         # maquina de estados + PID + calibracao
+    ├── bluetooth.c         # parser $GET/$SET/$CMD
+    ├── encoder.c           # leitura de pulsos
+    ├── lcd_i2c.c           # driver LCD
+    ├── line_sensor.c       # leitura ADC + min/max + centroide
+    ├── main.c              # init HAL + RTOS
+    ├── motor.c             # PWM dos motores
+    ├── pid.c               # algoritmo PID
+    ├── stm32g4xx_hal_msp.c # init MSP
+    ├── stm32g4xx_it.c      # ISRs (encoders, ultrassom, BT)
+    ├── system_stm32g4xx.c  # clock
+    ├── telemetry.c         # getters/setters com mutex
+    └── ultrasonic.c        # trigger HC-SR04
+```
 
+## Arquivos nao commitados
+
+Gerados localmente pelo CubeMX / build - ja estao no `.gitignore`:
 - `Projeto Final/Drivers/`
 - `Projeto Final/Middlewares/`
 - `Projeto Final/Debug/`
 - `.metadata/`, `.settings/`, `.cproject`, `.project`
 
-Cada pessoa roda **Generate Code** no `.ioc` após o `git pull`.
-
----
-
-## Estrutura do código principal
-
-```
-Projeto Final/Core/Src/
-├── app_tasks.c      ← máquina de estados + PID + seguir linha
-├── line_sensor.c    ← leitura ADC + centroide + cruzamento
-├── motor.c          ← PWM TIM1
-├── pid.c            ← controlador PID
-├── encoder.c        ← velocidade / distância
-├── telemetry.c      ← dados compartilhados
-├── lcd_i2c.c        ← display
-├── bluetooth.c      ← HC-05
-├── ultrasonic.c     ← HC-SR04 + segurança
-└── main.c           ← init + botões + tasks FreeRTOS
-```
-
----
-
-## Próximos passos (para o grupo)
-
-- [ ] Afinar `Kp` e `base_speed` na pista de prova
-- [ ] Validar parada correta no fim do percurso
-- [ ] Confirmar cruzamento em T
-- [ ] Tempo total < 1 min 30 s
-- [ ] Testar LCD e telemetria Bluetooth com hardware montado
-- [ ] Documentar ganhos finais que funcionaram
+Cada pessoa roda **Generate Code** no `.ioc` apos o `git pull`.
 
 ---
 
 ## Disciplina
 
-ES670 — Projeto Final — Grupo B1
+ES670 - Projeto Final - Grupo B1

@@ -7,6 +7,25 @@
 static I2C_HandleTypeDef *s_hi2c = NULL;
 static uint8_t s_addr = LCD_ADDR << 1;
 static uint8_t s_backlight = 0x08;
+static uint8_t s_lcd_debug = 0U;
+
+/* Leitura raw do ADC da bateria (canal 4 do ADC2). Declarada em app_tasks.c. */
+extern uint16_t App_ReadBatteryRaw(void);
+/* Contadores de encoder. */
+extern int32_t Encoder_GetCountLeft(void);
+extern int32_t Encoder_GetCountRight(void);
+/* Contador de ciclos do App_MotorCtrlTask (incrementa 100x/s). */
+extern volatile uint32_t g_motor_cycles;
+
+void LCD_SetDebugMode(uint8_t enable)
+{
+    s_lcd_debug = enable ? 1U : 0U;
+}
+
+uint8_t LCD_GetDebugMode(void)
+{
+    return s_lcd_debug;
+}
 
 #define PIN_RS   0x01
 #define PIN_EN   0x04
@@ -106,12 +125,29 @@ void App_LcdTask(void *argument)
 
     for (;;) {
         osDelay(1000);
-        Telemetry_Get(&telem);
 
-        snprintf(line, sizeof(line), "D:%-4dcm V:%-3d ", (int)telem.distance_cm, (int)telem.speed_cms);
-        LCD_PrintAt(0, 0, line);
-
-        snprintf(line, sizeof(line), "H:%-4d Bat:%-3d%%", (int)telem.heading_deg, (int)telem.battery_pct);
-        LCD_PrintAt(1, 0, line);
+        if (s_lcd_debug) {
+            /* Modo debug: motor cycles, encoder count, raw battery.
+             * Util para diagnosticar se encoders/bateria/motor task
+             * estao funcionando.
+             *
+             * MC deve crescer ~100x/s (task roda a 100Hz).
+             * EL/ER devem crescer quando as rodas giram.
+             * BatRaw deve ser > 100 (senao ADC le 0). */
+            int32_t el = Encoder_GetCountLeft();
+            int32_t er = Encoder_GetCountRight();
+            uint16_t bat_raw = App_ReadBatteryRaw();
+            uint32_t mc = g_motor_cycles;
+            snprintf(line, sizeof(line), "MC:%-5lu E:%-4ld", (unsigned long)mc, (long)el);
+            LCD_PrintAt(0, 0, line);
+            snprintf(line, sizeof(line), "Bat:%-4u R:%-4ld", (unsigned)bat_raw, (long)er);
+            LCD_PrintAt(1, 0, line);
+        } else {
+            Telemetry_Get(&telem);
+            snprintf(line, sizeof(line), "D:%-4dcm V:%-3d ", (int)telem.distance_cm, (int)telem.speed_cms);
+            LCD_PrintAt(0, 0, line);
+            snprintf(line, sizeof(line), "H:%-4d Bat:%-3d%%", (int)telem.heading_deg, (int)telem.battery_pct);
+            LCD_PrintAt(1, 0, line);
+        }
     }
 }
